@@ -1,8 +1,10 @@
 import yfinance as yf
 import requests
 import os
+import csv
+from datetime import datetime
 
-# Telegram Bot Token ane Chat ID (Environment variables athva direct ahiya)
+# Telegram Bot Token ane Chat ID
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8883124725:AAHAF8SGg3MkpliUPoBcJr8S30mlBQ15K9w")  
 CHAT_ID = os.getenv("CHAT_ID", "7161195228")                
 
@@ -21,6 +23,20 @@ def send_telegram_alert(message):
         return response.json()
     except Exception as e:
         print("Telegram Error:", e)
+
+def log_trade_to_csv(index_name, action, entry, target, stop_loss, lots):
+    file_exists = os.path.isfile("trade_log.csv")
+    try:
+        with open("trade_log.csv", mode="a", newline="") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["Timestamp", "Index", "Action", "Entry", "Target", "StopLoss", "Lots"])
+            
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            writer.writerow([current_time, index_name, action, entry, target, stop_loss, lots])
+        print(f"Trade logged successfully for {index_name}")
+    except Exception as e:
+        print("CSV Logging Error:", e)
 
 indices = {
     "NIFTY 50": {"symbol": "^NSEI", "lot_size": 25},
@@ -66,6 +82,7 @@ for name, info in indices.items():
                     )
                     print(f"ALERT SENT FOR {name}")
                     send_telegram_alert(alert_msg)
+                    log_trade_to_csv(name, "BUY CE", round(entry, 2), round(target, 2), round(stop_loss, 2), lots)
                         
             elif current_price <= low_price:
                 entry = current_price
@@ -89,6 +106,7 @@ for name, info in indices.items():
                     )
                     print(f"ALERT SENT FOR {name}")
                     send_telegram_alert(alert_msg)
+                    log_trade_to_csv(name, "BUY PE", round(entry, 2), round(target, 2), round(stop_loss, 2), lots)
             else:
                 print("Status: Trading inside range.")
                 
