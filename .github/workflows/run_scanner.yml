@@ -2,7 +2,6 @@ name: Market Breakout Scanner
 
 on:
   schedule:
-    # દર 5 મિનિટે રન થશે (સોમવારથી શુક્રવાર, ભારતીય સમય મુજબ સવારે 9 થી સાંજે 4 વાગ્યા સુધી)
     - cron: '*/5 3-10 * * 1-5'
   workflow_dispatch:
 
@@ -22,7 +21,7 @@ jobs:
         run: |
           pip install yfinance requests
 
-      - - name: Run scanner script
+      - name: Run scanner script
         env:
           TELEGRAM_BOT_TOKEN: "8883124725:AAHAF8SGg3MkpliUPoBcJr8S30mlBQ15K9w"
           CHAT_ID: "7161195228"
