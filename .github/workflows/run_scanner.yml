@@ -22,19 +22,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install yfinance requests
+          python -m pip install --upgrade pip
+          pip install requests pandas
 
       - name: Run scanner script
         env:
-          TELEGRAM_BOT_TOKEN: "8883124725:AAHAF8SGg3MkpliUPoBcJr8S30mlBQ15K9w"
-          CHAT_ID: "7161195228"
-        run: |
-          python scanner.py
-
-      - name: Commit and push trade log if changed
-        run: |
-          git config --global user.name "GitHub Actions Bot"
-          git config --global user.email "actions@github.com"
-          git add trade_log.csv
-          git diff --staged --quiet || git commit -m "Auto-update trade log [skip ci]"
-          git push
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python scanner.py
