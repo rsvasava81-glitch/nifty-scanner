@@ -47,7 +47,7 @@ def get_live_index_data(symbol):
 # symbol ઓપ્શન્સ: 'NIFTY 50', 'NIFTY BANK', 'NIFTY FIN SERVICE', 'NIFTY MIDSELECT'
 live_data = get_live_index_data("NIFTY 50")
 if live_data:
-    print(f"Live NIFTY 50 Price: {live_data['lastPrice']}") yf
+    print(f"Live NIFTY 50 Price: {live_data['lastPrice']}") 
 import requests
 import os
 import csv
