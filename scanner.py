@@ -5,11 +5,10 @@ import pandas as pd
 import requests
 
 # Telegram Bot Token and Chat ID
-TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN", "8883124725:AAF8ClFkl-d2EfnX7dERDBKrl9lh8zb8Vaw"
-)
-CHAT_ID = os.getenv("CHAT_ID", "7161195228")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID = os.getenv("CHAT_ID", "")
 
+# રિસ્ક મેનેજમેન્ટ સેટિંગ્સ
 MAX_LOSS_PER_TRADE = 1000
 RISK_REWARD_RATIO = 2.0
 
@@ -67,20 +66,44 @@ indices = [
     {"name": "SENSEX", "symbol": "SENSEX"},
 ]
 
-message_report = "🚀 *Live Market Scanner Test Report*\n\n"
+message_report = "🚀 *ORB Trade Scanner & Levels Report*\n\n"
 
 for idx in indices:
   data = get_live_index_data(idx["symbol"])
   if data:
+    ltp = data["lastPrice"]
+    high = data["high"]
+    low = data["low"]
+
+    # ORB Breakout Logic & Targets Calculation
+    signal = "Neutral / Waiting"
+    entry = ltp
+    if ltp >= high:
+      signal = "🟢 BULLISH BREAKOUT (BUY)"
+      stop_loss = low
+      risk = entry - stop_loss
+      target = entry + (risk * RISK_REWARD_RATIO)
+    elif ltp <= low:
+      signal = "🔴 BEARISH BREAKOUT (SELL)"
+      stop_loss = high
+      risk = stop_loss - entry
+      target = entry - (risk * RISK_REWARD_RATIO)
+    else:
+      stop_loss = low
+      target = high
+
     msg = (
-        f"*{idx['name']}*\nPrice: `{data['lastPrice']}`\nHigh: `{data['high']}` |"
-        f" Low: `{data['low']}`\n\n"
+        f"*{idx['name']}* | Status: {signal}\n"
+        f"• *Spot Price:* `{ltp}`\n"
+        f"• *ORB High:* `{high}` | *ORB Low:* `{low}`\n"
+        f"• *Entry:* `{entry:.2f}`\n"
+        f"• *Stop Loss:* `{stop_loss:.2f}`\n"
+        f"• *Target (2:1):* `{target:.2f}`\n\n"
     )
-    print(f"Live {idx['name']} Price: {data['lastPrice']}")
     message_report += msg
   else:
     print(f"Error for {idx['name']}: Could not fetch live data")
 
-# ટેલિગ્રામ પર મેસેજ મોકલવા માટે
+# ટેલિગ્રામ પર કમ્પ્લીટ રિપોર્ટ મોકલવા માટે
 send_telegram_alert(message_report)
-print("Telegram alert sent successfully!")
+print("ORB Scanner report sent successfully to Telegram!")
