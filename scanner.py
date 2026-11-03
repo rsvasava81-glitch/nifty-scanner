@@ -6,7 +6,7 @@ import requests
 
 # Telegram Bot Token and Chat ID
 TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN", "8883124725:AAHAF8SGg3MkpliUPoBcJr8S3OmlBQl5K9w"
+    "TELEGRAM_BOT_TOKEN", "8883124725:AAF8ClFkl-d2EfnX7dERDBKrl9lh8zb8Vaw"
 )
 CHAT_ID = os.getenv("CHAT_ID", "7161195228")
 
