@@ -67,12 +67,20 @@ indices = [
     {"name": "SENSEX", "symbol": "SENSEX"},
 ]
 
+message_report = "🚀 *Live Market Scanner Test Report*\n\n"
+
 for idx in indices:
   data = get_live_index_data(idx["symbol"])
   if data:
-    print(
-        f"Live {idx['name']} Price: {data['lastPrice']} (High:"
-        f" {data['high']}, Low: {data['low']})"
+    msg = (
+        f"*{idx['name']}*\nPrice: `{data['lastPrice']}`\nHigh: `{data['high']}` |"
+        f" Low: `{data['low']}`\n\n"
     )
+    print(f"Live {idx['name']} Price: {data['lastPrice']}")
+    message_report += msg
   else:
     print(f"Error for {idx['name']}: Could not fetch live data")
+
+# ટેલિગ્રામ પર મેસેજ મોકલવા માટે
+send_telegram_alert(message_report)
+print("Telegram alert sent successfully!")
