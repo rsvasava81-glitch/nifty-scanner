@@ -1,4 +1,53 @@
-import yfinance as yf
+import pandas as pd
+import requests
+
+
+def get_live_index_data(symbol):
+    """NSE ની ઓપન પબ્લિક એપીઆઈમાંથી લાઈવ સ્પોટ પ્રાઈસ ફેચ કરવાનું ફંક્શન"""
+    # NSE રિક્વેસ્ટ માટે જરૂરી હેડર્સ
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    session = requests.Session()
+    session.headers.update(headers)
+
+    try:
+        # NSE કૂકીઝ મેળવવા માટે પહેલા હોમપેજ હિટ કરવું પડે છે
+        session.get("https://www.nseindia.com", timeout=10)
+
+        # ઇન્ડેક્સ ડેટા એન્ડપોઇન્ટ
+        url = "https://www.nseindia.com/api/allIndices"
+        response = session.get(url, timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+            for index in data.get("data", []):
+                if index.get("indexSymbol") == symbol:
+                    # લાઈવ ડેટા રીટર્ન કરશે
+                    return {
+                        "lastPrice": index.get("last"),
+                        "open": index.get("open"),
+                        "high": index.get("high"),
+                        "low": index.get("low"),
+                        "previousClose": index.get("previousClose"),
+                    }
+    except Exception as e:
+        print(f"NSE API ડેટા ફેચ કરવામાં ભૂલ: {e}")
+
+    return None
+
+
+# ઉદાહરણ તરીકે NIFTY 50 નો લાઈવ ડેટા મેળવવો:
+# symbol ઓપ્શન્સ: 'NIFTY 50', 'NIFTY BANK', 'NIFTY FIN SERVICE', 'NIFTY MIDSELECT'
+live_data = get_live_index_data("NIFTY 50")
+if live_data:
+    print(f"Live NIFTY 50 Price: {live_data['lastPrice']}") yf
 import requests
 import os
 import csv
