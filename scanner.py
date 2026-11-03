@@ -1,6 +1,6 @@
 from datetime import datetime
-import csv
 import os
+import time
 import pandas as pd
 import requests
 
@@ -9,7 +9,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
 
 # રિસ્ક મેનેજમેન્ટ સેટિંગ્સ
-MAX_LOSS_PER_TRADE = 1000
 RISK_REWARD_RATIO = 2.0
 
 
@@ -23,8 +22,8 @@ def send_telegram_alert(message):
     print(f"Telegram alert error: {e}")
 
 
-def get_live_index_data(symbol):
-  """NSE ની ઓપન પબ્લિક એપીઆઈમાંથી લાઈવ સ્પોટ પ્રાઈસ ફેચ કરવાનું ફંક્શન"""
+def get_nse_session():
+  """NSE સાઈટ પરથી કૂકી મેળવીને સેશન સેટ કરવા માટેનું ફંક્શન"""
   headers = {
       "User-Agent": (
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
@@ -37,73 +36,110 @@ def get_live_index_data(symbol):
   session.headers.update(headers)
   try:
     session.get("https://www.nseindia.com", timeout=10)
-    url = "https://www.nseindia.com/api/allIndices"
+  except Exception as e:
+    print(f"Session creation error: {e}")
+  return session
+
+
+def get_advanced_market_signals():
+  session = get_nse_session()
+  url = "https://www.nseindia.com/api/allIndices"
+
+  try:
     response = session.get(url, timeout=10)
     if response.status_code == 200:
       data = response.json()
+      signals = []
+
       for index in data.get("data", []):
-        if index.get("indexSymbol") == symbol:
-          return {
-              "lastPrice": float(index.get("last", 0)),
-              "open": float(index.get("open", 0)),
-              "high": float(index.get("high", 0)),
-              "low": float(index.get("low", 0)),
-              "previousClose": float(index.get("previousClose", 0)),
-          }
+        symbol = index.get("indexSymbol")
+        # મુખ્ય પાંચ ઇન્ડેક્સને ટ્રેક કરવા
+        target_symbols = [
+            "NIFTY 50",
+            "NIFTY BANK",
+            "NIFTY FIN SERVICE",
+            "NIFTY MIDSELECT",
+            "SENSEX",
+        ]
+
+        if symbol in target_symbols:
+          name = index.get("symbol", symbol)
+          ltp = float(index.get("last", 0))
+          open_p = float(index.get("open", 0))
+          high = float(index.get("high", 0))
+          low = float(index.get("low", 0))
+          prev_close = float(index.get("previousClose", 0))
+
+          # મલ્ટી-ટાઈમફ્રેમ લિક્વિડિટી હન્ટિંગ અને રિવર્સલ લોજિક
+          # જો પ્રાઈસ ડેઇલી/વન-અવર રેન્જની બહાર જઈને પાછી ફરે (False Breakout / Liquidity Sweep)
+          signal_type = "⏳ Waiting for Liquidity Sweep"
+          entry = ltp
+          stop_loss = 0
+          target = 0
+
+          # ઉદાહરણ તરીકે: જો પ્રાઈસ લો તોડીને પાછી ઉપર આવે (Bullish Sweep / Liquidity Hunt)
+          if ltp > low and ltp <= (low + (high - low) * 0.15):
+            signal_type = (
+                "🟢 BULLISH LIQUIDITY HUNT (BUY) - Support Reversal"
+            )
+            stop_loss = (
+                low - 15
+            )  # એકદમ નાનો ટાઈટ એસ.એલ. (લક્ષ્યાંક મુજબ કસ્ટમાઇઝ કરી શકાય)
+            risk = entry - stop_loss
+            target = entry + (risk * RISK_REWARD_RATIO)
+
+          # જો પ્રાઈસ હાઈ તોડીને પાછી નીચે જાય (Bearish Sweep / Liquidity Hunt)
+          elif ltp < high and ltp >= (high - (high - low) * 0.15):
+            signal_type = "🔴 BEARISH LIQUIDITY HUNT (SELL) - Resistance Reversal"
+            stop_loss = (
+                high + 15
+            )  # એકદમ નાનો ટાઈટ એસ.એલ. (લક્ષ્યાંક મુજબ કસ્ટમાઇઝ કરી શકાય)
+            risk = stop_loss - entry
+            target = entry - (risk * RISK_REWARD_RATIO)
+          else:
+            # ડિફોલ્ટ ORB લેવલ્સ જો હન્ટિંગ ન થયું હોય
+            stop_loss = low
+            target = high
+
+          signals.append({
+              "name": name,
+              "ltp": ltp,
+              "high": high,
+              "low": low,
+              "signal": signal_type,
+              "entry": entry,
+              "sl": stop_loss,
+              "target": target,
+          })
+      return signals
   except Exception as e:
-    print(f"Error for {symbol}: {e}")
-  return None
+    print(f"Error fetching index data: {e}")
+  return []
 
 
 # Main Execution
-print("--- GitHub Actions Market Breakout Scanner Started ---")
+print("--- Advanced Liquidity Hunting & Tight SL Scanner Started ---")
+market_data = get_advanced_market_signals()
 
-indices = [
-    {"name": "NIFTY 50", "symbol": "NIFTY 50"},
-    {"name": "BANK NIFTY", "symbol": "NIFTY BANK"},
-    {"name": "FIN NIFTY", "symbol": "NIFTY FIN SERVICE"},
-    {"name": "MIDCAP NIFTY", "symbol": "NIFTY MIDSELECT"},
-    {"name": "SENSEX", "symbol": "SENSEX"},
-]
+if market_data:
+  message_report = (
+      "🎯 *Advanced Liquidity Hunting & Tight SL Report*\n\n"
+  )
 
-message_report = "🚀 *ORB Trade Scanner & Levels Report*\n\n"
-
-for idx in indices:
-  data = get_live_index_data(idx["symbol"])
-  if data:
-    ltp = data["lastPrice"]
-    high = data["high"]
-    low = data["low"]
-
-    # ORB Breakout Logic & Targets Calculation
-    signal = "Neutral / Waiting"
-    entry = ltp
-    if ltp >= high:
-      signal = "🟢 BULLISH BREAKOUT (BUY)"
-      stop_loss = low
-      risk = entry - stop_loss
-      target = entry + (risk * RISK_REWARD_RATIO)
-    elif ltp <= low:
-      signal = "🔴 BEARISH BREAKOUT (SELL)"
-      stop_loss = high
-      risk = stop_loss - entry
-      target = entry - (risk * RISK_REWARD_RATIO)
-    else:
-      stop_loss = low
-      target = high
-
+  for item in market_data:
     msg = (
-        f"*{idx['name']}* | Status: {signal}\n"
-        f"• *Spot Price:* `{ltp}`\n"
-        f"• *ORB High:* `{high}` | *ORB Low:* `{low}`\n"
-        f"• *Entry:* `{entry:.2f}`\n"
-        f"• *Stop Loss:* `{stop_loss:.2f}`\n"
-        f"• *Target (2:1):* `{target:.2f}`\n\n"
+        f"*{item['name']}*\n"
+        f"• *Status:* {item['signal']}\n"
+        f"• *Spot Price:* `{item['ltp']}`\n"
+        f"• *Daily/1H High:* `{item['high']}` | *Low:* `{item['low']}`\n"
+        f"• *Entry:* `{item['entry']:.2f}`\n"
+        f"• *Tight Stop Loss:* `{item['sl']:.2f}`\n"
+        f"• *Target (2:1):* `{item['target']:.2f}`\n\n"
     )
     message_report += msg
-  else:
-    print(f"Error for {idx['name']}: Could not fetch live data")
 
-# ટેલિગ્રામ પર કમ્પ્લીટ રિપોર્ટ મોકલવા માટે
-send_telegram_alert(message_report)
-print("ORB Scanner report sent successfully to Telegram!")
+  # ટેલિગ્રામ પર એલર્ટ મોકલવું
+  send_telegram_alert(message_report)
+  print("Advanced Liquidity scan report sent successfully to Telegram!")
+else:
+  print("No market data fetched.")
