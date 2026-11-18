@@ -19,16 +19,65 @@ def send_telegram_alert(message):
     except Exception as e:
         print(f"Failed to send telegram alert: {e}")
 
+def calculate_fib_extension(high, low, is_uptrend=True):
+    """
+    Calculates Trend-Based Fibonacci Extension levels for both Uptrend and Downtrend.
+    """
+    diff = high - low
+    levels = {}
+    
+    if is_uptrend:
+        # Uptrend: Low to High extension (Bullish setup)
+        # Retracement / Entry reference zones: 0.5, 0.618
+        levels['entry_0.5'] = high - (0.5 * diff)
+        levels['stop_loss_0.618'] = high - (0.618 * diff)
+        # Targets upwards
+        levels['t_1.414'] = high + (1.414 * diff)
+        levels['t_1.618'] = high + (1.618 * diff)
+        levels['t_2.000'] = high + (2.000 * diff)
+        levels['t_2.272'] = high + (2.272 * diff)
+        levels['t_2.618'] = high + (2.618 * diff)
+    else:
+        # Downtrend: High to Low extension (Bearish setup - as shown in your chart)
+        # Retracement / Entry reference zones: 0.5, 0.618
+        levels['entry_0.5'] = low + (0.5 * diff)
+        levels['stop_loss_0.618'] = low + (0.618 * diff)
+        # Targets downwards
+        levels['t_1.414'] = low - (1.414 * diff)
+        levels['t_1.618'] = low - (1.618 * diff)
+        levels['t_2.000'] = low - (2.000 * diff)
+        levels['t_2.272'] = low - (2.272 * diff)
+        levels['t_2.618'] = low - (2.618 * diff)
+        
+    return levels
+
 def run_scanner():
-    print("Initializing Sahi API scanner for 5-minute timeframe...")
+    print("Running 5-minute Trend-Based Fibonacci Extension Scanner...")
     try:
         if not KEY_ID or not SECRET:
             print("Sahi API credentials are not set properly.")
             return
 
-        # Yaha testing mate direct telegram alert moklisu jethi khabar pade
-        send_telegram_alert("🚀 *Nifty 5m Scanner*: Workflow successfully run thayu chhe ane connection ok chhe!")
-        print("5-minute Fibonacci Extension scanner checked successfully.")
+        # Example testing values based on your chart logic
+        # (Ahiya tame 5-min na nearest swing high ane low fetch karine pass karso)
+        sample_high = 25319.51
+        sample_low = 25141.80
+        
+        # Test Downtrend calculation (Jaise chart me bataya)
+        fib_levels = calculate_fib_extension(sample_high, sample_low, is_uptrend=False)
+        
+        alert_msg = (
+            f"📉 *5-Min Downtrend Fib Extension Alert*\n"
+            f"High: {sample_high} | Low: {sample_low}\n"
+            f"• 0.5 Level: `{fib_levels['entry_0.5']:.2f}`\n"
+            f"• 0.618 SL: `{fib_levels['stop_loss_0.618']:.2f}`\n"
+            f"• Target 1.618: `{fib_levels['t_1.618']:.2f}`\n"
+            f"• Target 2.0: `{fib_levels['t_2.000']:.2f}`\n"
+            f"• Target 2.272: `{fib_levels['t_2.272']:.2f}`"
+        )
+        
+        send_telegram_alert(alert_msg)
+        print("Scanner executed and alert sent successfully!")
 
     except Exception as e:
         print(f"Error during execution: {e}")
