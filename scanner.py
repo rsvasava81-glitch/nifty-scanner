@@ -8,7 +8,14 @@ SECRET = os.environ.get("SAHI_SECRET")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-def send_telegram_alert(message):
+def send_telegram_alert(message):msg = (
+        f"🚀 *F&O Target Update*\n"
+        f"-----------------------------------\n"
+        f"📌 *High:* `{swing_high_ref}` | *Low:* `{swing_low}`\n"  # <--- Aa line ahiya add karvani che
+        f"✅ Achieved Level: *{achieved}*\n"
+        f"🎯 Next Active Target: *{upcoming}*\n"
+        f"📈 Current Candle Close: `{current_close}`"
+    )
     if not TELEGRAM_TOKEN or not CHAT_ID:
         print("Telegram credentials missing!")
         return
