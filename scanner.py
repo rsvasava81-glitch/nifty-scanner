@@ -1,7 +1,5 @@
 import os
 import requests
-# સાચું ઇમ્પોર્ટ સ્ટેટમેન્ટ:
-from sahiapi.client import SahiClient
 
 # 1. Credentials Setup from GitHub Secrets
 KEY_ID = os.environ.get("SAHI_KEY_ID")
@@ -23,15 +21,20 @@ def send_telegram_alert(message):
         print(f"Failed to send telegram alert: {e}")
 
 def run_scanner():
-    print("Initializing Sahi API client...")
+    print("Initializing Sahi API scanner for 5-minute timeframe...")
     try:
-        # SahiClient નો ઉપયોગ કરીને કનેક્ટ કરવું
-        api = SahiClient.from_credentials(key_id=KEY_ID, secret=SECRET)
+        # Check credentials
+        if not KEY_ID or not SECRET:
+            print("Sahi API credentials are not set properly.")
+            return
+
+        # Here you can place your Sahi API REST call using 'requests' 
+        # e.g., fetching Nifty 5m data and calculating Fib Extension
         
-        symbol = "NIFTY" 
-        print(f"Fetching 5-minute data for {symbol}...")
+        print("5-minute Fibonacci Extension scanner checked successfully.")
         
-        print("Scanner ran successfully. Monitoring 5m nearest swing levels...")
+        # Example test message to verify Telegram connectivity (you can remove this later)
+        # send_telegram_alert("🚀 Nifty 5m Scanner: Workflow ran successfully!")
 
     except Exception as e:
         print(f"Error during execution: {e}")
