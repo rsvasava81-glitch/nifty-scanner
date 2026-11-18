@@ -1,7 +1,6 @@
 import os
 import requests
 
-# 1. Credentials Setup from GitHub Secrets
 KEY_ID = os.environ.get("SAHI_KEY_ID")
 SECRET = os.environ.get("SAHI_SECRET")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -23,18 +22,13 @@ def send_telegram_alert(message):
 def run_scanner():
     print("Initializing Sahi API scanner for 5-minute timeframe...")
     try:
-        # Check credentials
         if not KEY_ID or not SECRET:
             print("Sahi API credentials are not set properly.")
             return
 
-        # Here you can place your Sahi API REST call using 'requests' 
-        # e.g., fetching Nifty 5m data and calculating Fib Extension
-        
+        # Yaha testing mate direct telegram alert moklisu jethi khabar pade
+        send_telegram_alert("🚀 *Nifty 5m Scanner*: Workflow successfully run thayu chhe ane connection ok chhe!")
         print("5-minute Fibonacci Extension scanner checked successfully.")
-        
-        # Example test message to verify Telegram connectivity (you can remove this later)
-        # send_telegram_alert("🚀 Nifty 5m Scanner: Workflow ran successfully!")
 
     except Exception as e:
         print(f"Error during execution: {e}")
