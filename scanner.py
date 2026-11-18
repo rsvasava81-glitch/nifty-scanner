@@ -4,9 +4,6 @@ import pandas as pd
 import numpy as np
 import time
 
-# 1. Credentials Setup from GitHub Secrets
-KEY_ID = os.environ.get("SAHI_KEY_ID")
-SECRET = os.environ.get("SAHI_SECRET")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
@@ -23,135 +20,104 @@ def send_telegram_alert(message):
     except Exception as e:
         print(f"Failed to send telegram alert: {e}")
 
-def detect_swings(highs, lows, window=5):
+def automatic_trend_fib_scanner(df):
     """
-    Automatic Pivot Swing Detection for Internal / Outside Swings.
+    Automatically detects 3-Point Trend-Based Fibonacci Extension from OHLC data:
+    Point 1: Impulse Start (Significant Low)
+    Point 2: Impulse High (Peak after Low)
+    Point 3: Pullback Base / 0.0 Level (Retracement Low after High)
     """
-    high_series = pd.Series(highs)
-    low_series = pd.Series(lows)
+    highs = df['High'].values
+    lows = df['Low'].values
+    closes = df['Close'].values
+    n = len(df)
     
-    # Find rolling local maxima and minima
-    rolling_max = high_series.rolling(window=2*window+1, center=True).max()
-    rolling_min = low_series.rolling(window=2*window+1, center=True).min()
+    if n < 10:
+        return None
+        
+    # 1. Automatically find Point 1 (Lowest Low in the first half)
+    idx_p1 = lows[:n//2].argmin()
+    p1_low = lows[idx_p1]
     
-    swing_highs = high_series[high_series == rolling_max].dropna()
-    swing_lows = low_series[low_series == rolling_min].dropna()
+    # 2. Automatically find Point 2 (Highest High after Point 1)
+    sub_highs = highs[idx_p1:n-2]
+    if len(sub_highs) == 0:
+        return None
+    idx_p2 = idx_p1 + sub_highs.argmax()
+    p2_high = highs[idx_p2]
     
-    # Get the latest significant swing points
-    latest_high = swing_highs.iloc[-1] if not swing_highs.empty else highs[-1]
-    latest_low = swing_lows.iloc[-1] if not swing_lows.empty else lows[-1]
+    # 3. Automatically find Point 3 (Pullback Base / Low after Point 2)
+    sub_lows = lows[idx_p2:]
+    if len(sub_lows) == 0:
+        return None
+    idx_p3 = idx_p2 + sub_lows.argmin()
+    p3_base = lows[idx_p3]
     
-    return latest_low, latest_high
-
-def calculate_dynamic_fib_setup(df_candles, window=5):
-    """
-    Calculates Trend-Based Fibonacci Extension automatically using detected swings.
-    """
-    highs = df_candles['High'].values
-    lows = df_candles['Low'].values
-    closes = df_candles['Close'].values
+    # Impulse Range (Distance from Point 1 to Point 2)
+    impulse_range = p2_high - p1_low
+    if impulse_range <= 0:
+        return None
+        
+    # Extension Levels projected dynamically from Point 3 (Base / 0.0)
+    levels = {}
+    levels['0.0']   = p3_base
+    levels['0.382'] = p3_base + (impulse_range * 0.382)
+    levels['0.5']   = p3_base + (impulse_range * 0.5)
+    levels['0.618'] = p3_base + (impulse_range * 0.618)
+    levels['1.0']   = p3_base + impulse_range
+    levels['1.414'] = p3_base + (impulse_range * 1.414)
+    levels['1.618'] = p3_base + (impulse_range * 1.618)
+    levels['2.0']   = p3_base + (impulse_range * 2.0)
+    levels['2.272'] = p3_base + (impulse_range * 2.272)
+    levels['2.618'] = p3_base + (impulse_range * 2.618)
     
     current_close = closes[-1]
-    swing_low, swing_high = detect_swings(highs, lows, window=window)
+    trade_type = "🟢 CALL (CE) SIDE ENTRY"
+    stop_loss = p3_base
     
-    # Determine Trend Direction (Uptrend if Low occurred before High in recent context)
-    is_uptrend = swing_low < swing_high
-    fib_range = abs(swing_high - swing_low)
-    levels = {}
-    
-    if is_uptrend:
-        trade_type = "🟢 CALL (CE) SIDE ENTRY"
-        stop_loss = swing_low
-        
-        levels['0.0']   = swing_low
-        levels['0.382'] = swing_low + (fib_range * 0.382)
-        levels['0.5']   = swing_low + (fib_range * 0.5)
-        levels['0.618'] = swing_low + (fib_range * 0.618)
-        levels['1.0']   = swing_high
-        levels['1.414'] = swing_low + (fib_range * 1.414)
-        levels['1.618'] = swing_low + (fib_range * 1.618)
-        levels['2.0']   = swing_low + (fib_range * 2.0)
-        levels['2.272'] = swing_low + (fib_range * 2.272)
-        levels['2.618'] = swing_low + (fib_range * 2.618)
-        
-        # Target Progression based on Candle Close
-        if current_close >= levels['2.618']:
-            achieved, target = '2.618', 'All Targets Achieved! (Wait for New Swing)'
-        elif current_close >= levels['2.272']:
-            achieved, target = '2.272', f'{levels["2.618"]:.2f} (T4)'
-        elif current_close >= levels['2.0']:
-            achieved, target = '2.0', f'{levels["2.272"]:.2f} (T3)'
-        elif current_close >= levels['1.618']:
-            achieved, target = '1.618', f'{levels["2.0"]:.2f} & {levels["2.272"]:.2f} (T2)'
-        elif current_close >= levels['1.414']:
-            achieved, target = '1.414', f'{levels["1.618"]:.2f} (T1)'
-        elif current_close >= levels['0.618']:
-            achieved, target = '0.618', f'{levels["1.414"]:.2f} (Next Target)'
-        else:
-            achieved, target = 'Retracement Zone', f'{levels["1.0"]:.2f}'
-            
+    # Target Progression based on latest Candle Close
+    if current_close >= levels['1.618']:
+        achieved, target = '1.618', f'T3: {levels["2.0"]:.2f}'
+    elif current_close >= levels['1.414']:
+        achieved, target = '1.414', f'T2: {levels["1.618"]:.2f}'
+    elif current_close >= levels['0.618']:
+        achieved, target = '0.618 (Achieved)', f'T1 (1.414): {levels["1.414"]:.2f}'
+    elif current_close >= levels['0.5']:
+        achieved, target = '0.5', f'0.618 ({levels["0.618"]:.2f})'
     else:
-        trade_type = "🔴 PUT (PE) SIDE ENTRY"
-        stop_loss = swing_high
-        
-        levels['0.0']   = swing_high
-        levels['0.382'] = swing_high - (fib_range * 0.382)
-        levels['0.5']   = swing_high - (fib_range * 0.5)
-        levels['0.618'] = swing_high - (fib_range * 0.618)
-        levels['1.0']   = swing_low
-        levels['1.414'] = swing_high - (fib_range * 1.414)
-        levels['1.618'] = swing_high - (fib_range * 1.618)
-        levels['2.0']   = swing_high - (fib_range * 2.0)
-        levels['2.272'] = swing_high - (fib_range * 2.272)
-        levels['2.618'] = swing_high - (fib_range * 2.618)
-        
-        if current_close <= levels['2.618']:
-            achieved, target = '2.618', 'All Targets Achieved! (Wait for New Swing)'
-        elif current_close <= levels['1.414']:
-            achieved, target = '1.414', f'{levels["1.618"]:.2f}'
-        else:
-            achieved, target = 'Retracement Zone', f'{levels["1.414"]:.2f}'
+        achieved, target = 'Base (0.0)', f'0.5 ({levels["0.5"]:.2f})'
 
-    return trade_type, stop_loss, achieved, target, swing_low, swing_high, current_close
+    return trade_type, stop_loss, achieved, target, p3_base, p2_high, current_close, levels
 
 def main():
-    # Example market indices watchlist with dummy or live candle data frames
-    # In live execution, fetch OHLC dataframe from your broker/sahi app API.
-    
-    # Simulating recent candle dataframe for demonstration
+    # Watchlist / Live Data Integration (Replace with sahi app API dataframe)
+    # Here using sample dataframe reflecting live market swings
     sample_data = {
-        'High': [25180, 25210, 25190, 25214.27, 25220, 25236.5],
-        'Low': [25141.8, 25160, 25170, 25190, 25200, 25212.0],
-        'Close': [25160, 25190, 25180, 25210, 25216.5, 25236.5]
+        'High': [25180, 25210, 25238.48, 25210, 25225, 25230],
+        'Low': [25140, 25197.02, 25215, 25197.02, 25205, 25222.75],
+        'Close': [25160, 25200, 25220, 25205, 25215, 25222.75]
     }
     df = pd.DataFrame(sample_data)
     
-    indices_watchlist = [
-        {"name": "NIFTY 50 (NSE)", "data": df, "window": 2},
-        # Add other indices data here...
-    ]
-    
-    for item in indices_watchlist:
-        symbol_name = item["name"]
-        candles_df = item["data"]
-        win = item["window"]
-        
-        trade_type, sl, achieved, target, s_low, s_high, current_close = calculate_dynamic_fib_setup(candles_df, window=win)
+    result = automatic_trend_fib_scanner(df)
+    if result:
+        trade_type, sl, achieved, target, base_0, high_ref, current_close, lvl = result
         
         msg = (
-            f"🚀 *Auto-Swing F&O Setup: {symbol_name}*\n"
+            f"🎯 *Auto Trend-Fib Scanner: NIFTY 50 (NSE)*\n"
             f"-----------------------------------\n"
             f"{trade_type}\n"
-            f"📌 *Detected Swing High:* `{s_high}`\n"
-            f"📌 *Detected Swing Low:* `{s_low}`\n"
-            f"📥 *Candle Close:* `{current_close}`\n"
-            f"🛑 *Stop Loss (SL):* `{sl}`\n"
+            f"📌 *Base (0.0):* `{base_0:.2f}` | *Impulse High:* `{high_ref:.2f}`\n"
+            f"📥 *Candle Close:* `{current_close:.2f}`\n"
+            f"🛑 *Stop Loss (SL):* `{sl:.2f}`\n"
             f"✅ *Achieved Level:* `{achieved}`\n"
-            f"🎯 *Next Target:* `{target}`"
+            f"🎯 *Next Target:* `{target}`\n"
+            f"📊 *0.618 Level:* `{lvl['0.618']:.2f}`"
         )
         
         send_telegram_alert(msg)
-        time.sleep(1)
+    else:
+        print("Not enough swing data for calculation.")
 
 if __name__ == "__main__":
     main()
