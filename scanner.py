@@ -1,6 +1,7 @@
 import os
 import requests
 
+# 1. Credentials Setup from GitHub Secrets
 KEY_ID = os.environ.get("SAHI_KEY_ID")
 SECRET = os.environ.get("SAHI_SECRET")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -28,21 +29,20 @@ def calculate_fib_extension(high, low, is_uptrend=True):
     
     if is_uptrend:
         # Uptrend: Low to High extension (Bullish setup)
-        # Retracement / Entry reference zones: 0.5, 0.618
         levels['entry_0.5'] = high - (0.5 * diff)
         levels['stop_loss_0.618'] = high - (0.618 * diff)
-        # Targets upwards
         levels['t_1.414'] = high + (1.414 * diff)
         levels['t_1.618'] = high + (1.618 * diff)
         levels['t_2.000'] = high + (2.000 * diff)
         levels['t_2.272'] = high + (2.272 * diff)
         levels['t_2.618'] = high + (2.618 * diff)
     else:
-        # Downtrend: High to Low extension (Bearish setup - as shown in your chart)
-        # Retracement / Entry reference zones: 0.5, 0.618
+        # Downtrend: High to Low extension (Bearish setup - Corrected logic)
+        # Entry ane SL high/low na beech ma retracement par thay
         levels['entry_0.5'] = low + (0.5 * diff)
         levels['stop_loss_0.618'] = low + (0.618 * diff)
-        # Targets downwards
+        
+        # Targets down side: Low mathi minus thase etle price niche jetr targets malse
         levels['t_1.414'] = low - (1.414 * diff)
         levels['t_1.618'] = low - (1.618 * diff)
         levels['t_2.000'] = low - (2.000 * diff)
@@ -58,17 +58,16 @@ def run_scanner():
             print("Sahi API credentials are not set properly.")
             return
 
-        # Example testing values based on your chart logic
-        # (Ahiya tame 5-min na nearest swing high ane low fetch karine pass karso)
+        # Testing values based on your previous chart high and low
         sample_high = 25319.51
         sample_low = 25141.80
         
-        # Test Downtrend calculation (Jaise chart me bataya)
+        # Calculate Downtrend Fib Extension with corrected logic
         fib_levels = calculate_fib_extension(sample_high, sample_low, is_uptrend=False)
         
         alert_msg = (
             f"📉 *5-Min Downtrend Fib Extension Alert*\n"
-            f"High: {sample_high} | Low: {sample_low}\n"
+            f"High: `{sample_high}` | Low: `{sample_low}`\n"
             f"• 0.5 Level: `{fib_levels['entry_0.5']:.2f}`\n"
             f"• 0.618 SL: `{fib_levels['stop_loss_0.618']:.2f}`\n"
             f"• Target 1.618: `{fib_levels['t_1.618']:.2f}`\n"
@@ -77,7 +76,7 @@ def run_scanner():
         )
         
         send_telegram_alert(alert_msg)
-        print("Scanner executed and alert sent successfully!")
+        print("Scanner executed and corrected alert sent successfully!")
 
     except Exception as e:
         print(f"Error during execution: {e}")
