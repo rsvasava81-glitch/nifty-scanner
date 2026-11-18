@@ -59,25 +59,38 @@ def calculate_fib_and_targets(swing_low, swing_high_reference, current_close_pri
     return levels, active_target, next_target
 
 def main():
-    swing_low = 25141.80        
-    swing_high_ref = 25214.68   
-    current_close = 25236.49    
-    uptrend_status = True       
+    # --- NSE ane BSE F&O Indices Watchlist ---
+    indices_watchlist = [
+        {"name": "NIFTY 50 (NSE)", "high": 25214.68, "low": 25141.80, "close": 25236.49, "uptrend": True},
+        {"name": "BANKNIFTY (NSE)", "high": 51500.00, "low": 51200.00, "close": 51350.00, "uptrend": True},
+        {"name": "FINNIFTY (NSE)", "high": 23400.00, "low": 23250.00, "close": 23320.00, "uptrend": True},
+        {"name": "MIDCAP NIFTY (NSE)", "high": 12500.00, "low": 12400.00, "close": 12460.00, "uptrend": True},
+        {"name": "SENSEX (BSE)", "high": 82500.00, "low": 82000.00, "close": 82250.00, "uptrend": True}
+    ]
     
-    levels, achieved, upcoming = calculate_fib_and_targets(
-        swing_low, swing_high_ref, current_close, is_uptrend=uptrend_status
-    )
-    
-    msg = (
-        f"🚀 *F&O Target Update*\n"
-        f"-----------------------------------\n"
-        f"📌 *High:* `{swing_high_ref}` | *Low:* `{swing_low}`\n"
-        f"✅ Achieved Level: *{achieved}*\n"
-        f"🎯 Next Active Target: *{upcoming}*\n"
-        f"📈 Current Candle Close: `{current_close}`"
-    )
-    
-    send_telegram_alert(msg)
+    for item in indices_watchlist:
+        symbol_name = item["name"]
+        swing_high_ref = item["high"]
+        swing_low = item["low"]
+        current_close = item["close"]
+        uptrend_status = item["uptrend"]
+        
+        levels, achieved, upcoming = calculate_fib_and_targets(
+            swing_low, swing_high_ref, current_close, is_uptrend=uptrend_status
+        )
+        
+        # Telegram Message Formatting
+        msg = (
+            f"🚀 *F&O Target Update: {symbol_name}*\n"
+            f"-----------------------------------\n"
+            f"📌 *High:* `{swing_high_ref}` | *Low:* `{swing_low}`\n"
+            f"✅ Achieved Level: *{achieved}*\n"
+            f"🎯 Next Active Target: *{upcoming}*\n"
+            f"📈 Current Candle Close: `{current_close}`"
+        )
+        
+        send_telegram_alert(msg)
+        time.sleep(1) # Telegram API spam limit avoid karva mate
 
 if __name__ == "__main__":
     main()
