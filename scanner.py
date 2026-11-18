@@ -21,11 +21,16 @@ def send_telegram_alert(message):
     except Exception as e:
         print(f"Failed to send telegram alert: {e}")
 
-def calculate_fib_and_targets(swing_low, swing_high_reference, current_close_price, is_uptrend=True):
+def calculate_trade_setup(swing_low, swing_high_reference, current_close_price, is_uptrend=True):
     fib_range = abs(swing_high_reference - swing_low)
     levels = {}
     
     if is_uptrend:
+        # --- UPTREND / CALL SIDE SETUP ---
+        trade_type = "🟢 CALL (CE) SIDE ENTRY"
+        entry_price = current_close_price
+        stop_loss = swing_low  # Swing Low is the SL for Call
+        
         levels['0.0']   = swing_low
         levels['0.382'] = swing_low + (fib_range * 0.382)
         levels['0.5']   = swing_low + (fib_range * 0.5)
@@ -37,30 +42,30 @@ def calculate_fib_and_targets(swing_low, swing_high_reference, current_close_pri
         levels['2.272'] = swing_low + (fib_range * 2.272)
         levels['2.618'] = swing_low + (fib_range * 2.618)
         
-        # --- Custom Uptrend Target Progression Logic ---
+        # Target Progression Logic for Uptrend
         if current_close_price >= levels['2.618']:
-            achieved, next_target = '2.618', 'All Targets Achieved!'
+            achieved, target = '2.618', 'All Targets Achieved!'
         elif current_close_price >= levels['2.272']:
-            achieved, next_target = '2.272', '2.618'
+            achieved, target = '2.272', f'T3: {levels["2.618"]:.2f}'
         elif current_close_price >= levels['2.0']:
-            achieved, next_target = '2.0', '2.272'
+            achieved, target = '2.0', f'T3: {levels["2.272"]:.2f}'
         elif current_close_price >= levels['1.618']:
-            achieved, next_target = '1.618', '2.0 & 2.272'  # 1.618 upar close thai tyare target 2 ane 2.272
+            achieved, target = '1.618', f'T3: {levels["2.0"]:.2f} / {levels["2.272"]:.2f}'
         elif current_close_price >= levels['1.414']:
-            achieved, next_target = '1.414', '1.618'
+            achieved, target = '1.414', f'T2: {levels["1.618"]:.2f}'
         elif current_close_price >= levels['1.0']:
-            achieved, next_target = '1.0 (High)', '1.414'
+            achieved, target = '1.0 (High)', f'T1: {levels["1.414"]:.2f}'
         elif current_close_price >= levels['0.618']:
-            achieved, next_target = '0.618', '1.414'  # 0.618 upar close thai tyare direct target 1.414
-        elif current_close_price >= levels['0.5']:
-            achieved, next_target = '0.5', '0.618'
-        elif current_close_price >= levels['0.382']:
-            achieved, next_target = '0.382', '0.5'
+            achieved, target = '0.618', f'Target: {levels["1.414"]:.2f}'
         else:
-            achieved, next_target = '0.0 (Low)', '0.382'
+            achieved, target = 'Base / Retracement', f'Target: {levels["1.0"]:.2f}'
             
     else:
-        # --- Custom Downtrend Target Progression Logic ---
+        # --- DOWNTREND / PUT SIDE SETUP ---
+        trade_type = "🔴 PUT (PE) SIDE ENTRY"
+        entry_price = current_close_price
+        stop_loss = swing_high_reference  # Swing High is the SL for Put
+        
         levels['0.0']   = swing_high_reference
         levels['0.382'] = swing_high_reference - (fib_range * 0.382)
         levels['0.5']   = swing_high_reference - (fib_range * 0.5)
@@ -73,30 +78,24 @@ def calculate_fib_and_targets(swing_low, swing_high_reference, current_close_pri
         levels['2.618'] = swing_high_reference - (fib_range * 2.618)
         
         if current_close_price <= levels['2.618']:
-            achieved, next_target = '2.618', 'All Targets Achieved!'
+            achieved, target = '2.618', 'All Targets Achieved!'
         elif current_close_price <= levels['2.272']:
-            achieved, next_target = '2.272', '2.618'
+            achieved, target = '2.272', f'T3: {levels["2.618"]:.2f}'
         elif current_close_price <= levels['2.0']:
-            achieved, next_target = '2.0', '2.272'
+            achieved, target = '2.0', f'T3: {levels["2.272"]:.2f}'
         elif current_close_price <= levels['1.618']:
-            achieved, next_target = '1.618', '2.0 & 2.272'
+            achieved, target = '1.618', f'T3: {levels["2.0"]:.2f}'
         elif current_close_price <= levels['1.414']:
-            achieved, next_target = '1.414', '1.618'
+            achieved, target = '1.414', f'T2: {levels["1.618"]:.2f}'
         elif current_close_price <= levels['1.0']:
-            achieved, next_target = '1.0 (Low)', '1.414'
-        elif current_close_price <= levels['0.618']:
-            achieved, next_target = '0.618', '1.414'
-        elif current_close_price <= levels['0.5']:
-            achieved, next_target = '0.5', '0.618'
-        elif current_close_price <= levels['0.382']:
-            achieved, next_target = '0.382', '0.5'
+            achieved, target = '1.0 (Low)', f'T1: {levels["1.414"]:.2f}'
         else:
-            achieved, next_target = '0.0 (High)', '0.382'
+            achieved, target = 'Base', f'Target: {levels["1.0"]:.2f}'
 
-    return levels, achieved, next_target
+    return trade_type, entry_price, stop_loss, achieved, target
 
 def main():
-    # --- NSE & BSE F&O Indices Watchlist ---
+    # Watchlist for NSE & BSE F&O Indices
     indices_watchlist = [
         {"name": "NIFTY 50 (NSE)", "high": 25214.68, "low": 25141.80, "close": 25236.49, "uptrend": True},
         {"name": "BANKNIFTY (NSE)", "high": 51500.00, "low": 51200.00, "close": 51350.00, "uptrend": True},
@@ -112,18 +111,20 @@ def main():
         current_close = item["close"]
         uptrend_status = item["uptrend"]
         
-        levels, achieved, upcoming = calculate_fib_and_targets(
+        trade_type, entry, sl, achieved, target = calculate_trade_setup(
             swing_low, swing_high_ref, current_close, is_uptrend=uptrend_status
         )
         
-        # Telegram Message Formatting
+        # Complete F&O Trade Setup Message for Telegram
         msg = (
-            f"🚀 *F&O Target Update: {symbol_name}*\n"
+            f"🎯 *F&O Trade Setup: {symbol_name}*\n"
             f"-----------------------------------\n"
+            f"{trade_type}\n"
             f"📌 *High:* `{swing_high_ref}` | *Low:* `{swing_low}`\n"
-            f"✅ Achieved Level: *{achieved}*\n"
-            f"🎯 Next Active Target: *{upcoming}*\n"
-            f"📈 Current Candle Close: `{current_close}`"
+            f"📥 *Entry / Close:* `{current_close}`\n"
+            f"🛑 *Stop Loss (SL):* `{sl}`\n"
+            f"✅ *Achieved Level:* `{achieved}`\n"
+            f"🎯 *Next Target:* `{target}`"
         )
         
         send_telegram_alert(msg)
