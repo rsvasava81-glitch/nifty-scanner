@@ -36,30 +36,67 @@ def calculate_fib_and_targets(swing_low, swing_high_reference, current_close_pri
         levels['2.0']   = swing_low + (fib_range * 2.0)
         levels['2.272'] = swing_low + (fib_range * 2.272)
         levels['2.618'] = swing_low + (fib_range * 2.618)
+        
+        # --- Custom Uptrend Target Progression Logic ---
+        if current_close_price >= levels['2.618']:
+            achieved, next_target = '2.618', 'All Targets Achieved!'
+        elif current_close_price >= levels['2.272']:
+            achieved, next_target = '2.272', '2.618'
+        elif current_close_price >= levels['2.0']:
+            achieved, next_target = '2.0', '2.272'
+        elif current_close_price >= levels['1.618']:
+            achieved, next_target = '1.618', '2.0 & 2.272'  # 1.618 upar close thai tyare target 2 ane 2.272
+        elif current_close_price >= levels['1.414']:
+            achieved, next_target = '1.414', '1.618'
+        elif current_close_price >= levels['1.0']:
+            achieved, next_target = '1.0 (High)', '1.414'
+        elif current_close_price >= levels['0.618']:
+            achieved, next_target = '0.618', '1.414'  # 0.618 upar close thai tyare direct target 1.414
+        elif current_close_price >= levels['0.5']:
+            achieved, next_target = '0.5', '0.618'
+        elif current_close_price >= levels['0.382']:
+            achieved, next_target = '0.382', '0.5'
+        else:
+            achieved, next_target = '0.0 (Low)', '0.382'
+            
     else:
+        # --- Custom Downtrend Target Progression Logic ---
         levels['0.0']   = swing_high_reference
         levels['0.382'] = swing_high_reference - (fib_range * 0.382)
         levels['0.5']   = swing_high_reference - (fib_range * 0.5)
         levels['0.618'] = swing_high_reference - (fib_range * 0.618)
         levels['1.0']   = swing_low
+        levels['1.414'] = swing_high_reference - (fib_range * 1.414)
+        levels['1.618'] = swing_high_reference - (fib_range * 1.618)
+        levels['2.0']   = swing_high_reference - (fib_range * 2.0)
+        levels['2.272'] = swing_high_reference - (fib_range * 2.272)
+        levels['2.618'] = swing_high_reference - (fib_range * 2.618)
+        
+        if current_close_price <= levels['2.618']:
+            achieved, next_target = '2.618', 'All Targets Achieved!'
+        elif current_close_price <= levels['2.272']:
+            achieved, next_target = '2.272', '2.618'
+        elif current_close_price <= levels['2.0']:
+            achieved, next_target = '2.0', '2.272'
+        elif current_close_price <= levels['1.618']:
+            achieved, next_target = '1.618', '2.0 & 2.272'
+        elif current_close_price <= levels['1.414']:
+            achieved, next_target = '1.414', '1.618'
+        elif current_close_price <= levels['1.0']:
+            achieved, next_target = '1.0 (Low)', '1.414'
+        elif current_close_price <= levels['0.618']:
+            achieved, next_target = '0.618', '1.414'
+        elif current_close_price <= levels['0.5']:
+            achieved, next_target = '0.5', '0.618'
+        elif current_close_price <= levels['0.382']:
+            achieved, next_target = '0.382', '0.5'
+        else:
+            achieved, next_target = '0.0 (High)', '0.382'
 
-    active_target = None
-    next_target = None
-    
-    sorted_levels = sorted(levels.items(), key=lambda x: x[1])
-    
-    for i, (level_name, price) in enumerate(sorted_levels):
-        if current_close_price >= price:
-            active_target = level_name
-            if i + 1 < len(sorted_levels):
-                next_target = sorted_levels[i + 1][0]
-            else:
-                next_target = "All Targets Achieved!"
-                
-    return levels, active_target, next_target
+    return levels, achieved, next_target
 
 def main():
-    # --- NSE ane BSE F&O Indices Watchlist ---
+    # --- NSE & BSE F&O Indices Watchlist ---
     indices_watchlist = [
         {"name": "NIFTY 50 (NSE)", "high": 25214.68, "low": 25141.80, "close": 25236.49, "uptrend": True},
         {"name": "BANKNIFTY (NSE)", "high": 51500.00, "low": 51200.00, "close": 51350.00, "uptrend": True},
@@ -90,7 +127,7 @@ def main():
         )
         
         send_telegram_alert(msg)
-        time.sleep(1) # Telegram API spam limit avoid karva mate
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()
