@@ -13,7 +13,9 @@ LOG_FILE = "trade_log.csv"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-SAHI_BASE_URL = (os.environ.get("SAHI_BASE_URL") or "https://api.sahi.com").rstrip("/")
+SAHI_AUTH_BASE_URL = (os.environ.get("SAHI_AUTH_BASE_URL") or "https://apis.sahi.com").rstrip("/")
+SAHI_API_BASE_URL = (os.environ.get("SAHI_API_BASE_URL") or "https://direct.sahi.com").rstrip("/")
+
 SAHI_KEY_ID = (
     os.environ.get("SAHI_KEY_ID")
     or os.environ.get("SAHI_API_KEY")
@@ -126,32 +128,25 @@ def mint_sahi_token() -> str | None:
     if ACTIVE_BEARER_TOKEN:
         return ACTIVE_BEARER_TOKEN
 
-    token_urls = [
-        f"{SAHI_BASE_URL}/api/v1/apikeys/token",
-        f"{SAHI_BASE_URL}/v1/apikeys/token",
-    ]
-    payloads = []
+    url = f"{SAHI_AUTH_BASE_URL}/api/v1/apikeys/token"
     if SAHI_KEY_ID and SAHI_SECRET:
-        payloads.append({"key_id": SAHI_KEY_ID, "secret": SAHI_SECRET})
-        payloads.append({"api_key": SAHI_KEY_ID, "api_secret": SAHI_SECRET})
-        payloads.append({"keyId": SAHI_KEY_ID, "secretKey": SAHI_SECRET})
-    elif SAHI_KEY_ID:
-        payloads.append({"key_id": SAHI_KEY_ID})
-        payloads.append({"api_key": SAHI_KEY_ID})
-
-    for url in token_urls:
-        for body in payloads:
-            try:
-                resp = requests.post(url, json=body, headers={"Accept": "application/json", "Content-Type": "application/json"}, timeout=15)
-                print(f"Token Mint [{url}] keys={list(body.keys())} -> HTTP {resp.status_code}: {resp.text[:140]}")
-                if resp.status_code in (200, 201):
-                    tok = extract_token(resp.json())
-                    if tok:
-                        ACTIVE_BEARER_TOKEN = tok
-                        print("Successfully minted Sahi Bearer token.")
-                        return ACTIVE_BEARER_TOKEN
-            except Exception as e:
-                print(f"Token Mint Exception ({url}): {e}")
+        try:
+            payload = {"key_id": SAHI_KEY_ID, "secret": SAHI_SECRET}
+            resp = requests.post(
+                url,
+                json=payload,
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                timeout=15,
+            )
+            print(f"Token Mint [{url}] -> HTTP {resp.status_code}: {resp.text[:160]}")
+            if resp.status_code in (200, 201):
+                tok = extract_token(resp.json())
+                if tok:
+                    ACTIVE_BEARER_TOKEN = tok
+                    print("Successfully minted Sahi Bearer token.")
+                    return ACTIVE_BEARER_TOKEN
+        except Exception as e:
+            print(f"Token Mint Exception ({url}): {e}")
 
     if EXPLICIT_ACCESS_TOKEN:
         ACTIVE_BEARER_TOKEN = EXPLICIT_ACCESS_TOKEN.strip()
@@ -176,15 +171,15 @@ def auto_resolve_instrument_ids():
 
     scripmaster_urls = [
         "https://assets.sahi.com/external/instruments.csv",
-        f"{SAHI_BASE_URL}/v1/marketdata/scripmaster",
-        f"{SAHI_BASE_URL}/v1/scripmaster",
+        f"{SAHI_API_BASE_URL}/v1/marketdata/scripmaster",
+        f"{SAHI_API_BASE_URL}/v1/scripmaster",
     ]
     for url in scripmaster_urls:
         try:
             resp = requests.get(url, headers=sahi_headers(), timeout=20)
             if resp.status_code != 200 or not resp.text:
                 continue
-            df_sm = pd.read_csv(io.StringIO(resp.text))
+            df_sm = pd.read_csv(io.StringIO(resp.text), low_memory=False)
             id_col = next((c for c in ["id", "instrument_id", "security_id", "token"] if c in df_sm.columns), None)
             sym_col = next((c for c in ["symbol", "trading_symbol", "name", "display_name"] if c in df_sm.columns), None)
             if not id_col or not sym_col:
@@ -208,6 +203,15 @@ def auto_resolve_instrument_ids():
             return
         except Exception as e:
             print(f"Scripmaster lookup ({url}) skipped: {e}")
+
+
+def normalize_paise_series(series: pd.Series) -> pd.Series:
+    """Sahi docs mujab prices paise ma hoy to 100 vade bhagi ne rupees ma convert kare."""
+    s = pd.to_numeric(series, errors="coerce")
+    med = float(s.dropna().median()) if len(s.dropna()) > 0 else 0.0
+    if med > 200000.0:
+        return s / 100.0
+    return s
 
 
 def parse_candles_payload(payload_json) -> pd.DataFrame | None:
@@ -235,13 +239,39 @@ def parse_candles_payload(payload_json) -> pd.DataFrame | None:
     else:
         return None
 
-    for col in ["Open", "High", "Low", "Close", "Volume"]:
+    for col in ["Open", "High", "Low", "Close"]:
         if col not in df.columns:
             df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = normalize_paise_series(df[col])
+
+    if "Volume" not in df.columns:
+        df["Volume"] = 0.0
+    df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
 
     df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["High", "Low", "Close"]).tail(40).reset_index(drop=True)
     return df if len(df) >= 6 else None
+
+
+def parse_ltp_into_df(payload_json, inst_id: str, fallback_df: pd.DataFrame) -> pd.DataFrame | None:
+    if not isinstance(payload_json, dict):
+        return None
+    data = payload_json.get("data")
+    ltp_val = None
+    if isinstance(data, dict):
+        entry = data.get(str(inst_id)) or next(iter(data.values()), None)
+        if isinstance(entry, dict):
+            raw_ltp = entry.get("last_trade_price") or entry.get("ltp") or entry.get("last_price")
+            if raw_ltp is not None:
+                val = float(raw_ltp)
+                ltp_val = val / 100.0 if val > 200000.0 else val
+    if ltp_val is None or ltp_val <= 0:
+        return None
+
+    out = fallback_df.copy()
+    out.loc[out.index[-1], "Close"] = ltp_val
+    out.loc[out.index[-1], "High"] = max(float(out.loc[out.index[-1], "High"]), ltp_val)
+    out.loc[out.index[-1], "Low"] = min(float(out.loc[out.index[-1], "Low"]), ltp_val)
+    return out
 
 
 def parse_oi_payload(payload_json) -> dict | None:
@@ -276,31 +306,7 @@ def parse_oi_payload(payload_json) -> dict | None:
     }
 
 
-def fetch_sahi_candles_and_oi(symbol: str, cfg: dict):
-    inst_id = cfg.get("instrument_id")
-    token = mint_sahi_token()
-
-    if token and inst_id:
-        try:
-            c_url = f"{SAHI_BASE_URL}/v1/marketdata/candles"
-            c_params = {"instrument_id": int(inst_id), "interval": "5m"}
-            c_resp = requests.get(c_url, headers=sahi_headers(), params=c_params, timeout=15)
-            print(f"[{symbol}] Sahi Candles HTTP {c_resp.status_code}: {c_resp.text[:160]}")
-            df = parse_candles_payload(c_resp.json()) if c_resp.status_code == 200 else None
-
-            oc_url = f"{SAHI_BASE_URL}/v1/marketdata/optionchain"
-            oc_params = {"instrument_id": int(inst_id)}
-            oc_resp = requests.get(oc_url, headers=sahi_headers(), params=oc_params, timeout=15)
-            print(f"[{symbol}] Sahi OC HTTP {oc_resp.status_code}: {oc_resp.text[:160]}")
-            oi_summary = parse_oi_payload(oc_resp.json()) if oc_resp.status_code == 200 else None
-
-            if df is not None and oi_summary is not None:
-                return df, oi_summary
-        except Exception as e:
-            print(f"[{symbol}] Sahi API Exception: {e}")
-    else:
-        print(f"[{symbol}] Missing token or instrument_id (token={bool(token)}, inst_id={inst_id}) -> using Fallback.")
-
+def build_fallback_df_and_oi(symbol: str):
     if symbol == "NIFTY 50":
         df = pd.DataFrame({
             "Open":   [25710.0, 25735.0, 25755.0, 25742.0, 25765.0, 25782.0],
@@ -323,6 +329,44 @@ def fetch_sahi_candles_and_oi(symbol: str, cfg: dict):
     })
     oi_summary = {"pcr": 1.06, "call_oi": 95.0, "put_oi": 100.7, "source": "Fallback"}
     return df, oi_summary
+
+
+def fetch_sahi_candles_and_oi(symbol: str, cfg: dict):
+    inst_id = cfg.get("instrument_id")
+    token = mint_sahi_token()
+    fb_df, fb_oi = build_fallback_df_and_oi(symbol)
+
+    if token and inst_id:
+        try:
+            c_url = f"{SAHI_API_BASE_URL}/v1/marketdata/candles"
+            c_params = {"i": int(inst_id), "instrument_id": int(inst_id), "interval": "5m"}
+            c_resp = requests.get(c_url, headers=sahi_headers(), params=c_params, timeout=15)
+            print(f"[{symbol}] Sahi Candles HTTP {c_resp.status_code}: {c_resp.text[:160]}")
+            df = parse_candles_payload(c_resp.json()) if c_resp.status_code == 200 else None
+
+            if df is None:
+                ltp_url = f"{SAHI_API_BASE_URL}/v1/marketdata/ltp"
+                ltp_resp = requests.get(ltp_url, headers=sahi_headers(), params={"i": int(inst_id)}, timeout=15)
+                print(f"[{symbol}] Sahi LTP HTTP {ltp_resp.status_code}: {ltp_resp.text[:160]}")
+                if ltp_resp.status_code == 200:
+                    df = parse_ltp_into_df(ltp_resp.json(), str(inst_id), fb_df)
+
+            oc_url = f"{SAHI_API_BASE_URL}/v1/marketdata/optionchain"
+            oc_params = {"i": int(inst_id), "instrument_id": int(inst_id)}
+            oc_resp = requests.get(oc_url, headers=sahi_headers(), params=oc_params, timeout=15)
+            print(f"[{symbol}] Sahi OC HTTP {oc_resp.status_code}: {oc_resp.text[:160]}")
+            oi_summary = parse_oi_payload(oc_resp.json()) if oc_resp.status_code == 200 else None
+
+            if df is not None and oi_summary is not None:
+                return df, oi_summary
+            if df is not None:
+                return df, fb_oi
+        except Exception as e:
+            print(f"[{symbol}] Sahi API Exception: {e}")
+    else:
+        print(f"[{symbol}] Missing token or instrument_id (token={bool(token)}, inst_id={inst_id}) -> using Fallback.")
+
+    return fb_df, fb_oi
 
 
 def analyze_footprint_and_oi(df: pd.DataFrame, oi: dict):
