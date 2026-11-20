@@ -29,7 +29,7 @@ INDEX_CONFIG = {
         "min_price": 15000.0,
         "max_price": 40000.0,
         "sl_points": 55.0,
-        "exact_symbols": ["NIFTY 50", "NIFTY50", "NIFTY"],
+        "match_terms": ["NIFTY 50", "NIFTY50", "NIFTY INDEX"],
     },
     "BANKNIFTY": {
         "env_id": (os.environ.get("BANKNIFTY_INST_ID") or "").strip(),
@@ -37,7 +37,7 @@ INDEX_CONFIG = {
         "min_price": 35000.0,
         "max_price": 95000.0,
         "sl_points": 140.0,
-        "exact_symbols": ["BANKNIFTY", "NIFTY BANK", "NIFTYBANK"],
+        "match_terms": ["NIFTY BANK", "BANKNIFTY"],
     },
     "FINNIFTY": {
         "env_id": (os.environ.get("FINNIFTY_INST_ID") or "").strip(),
@@ -45,7 +45,7 @@ INDEX_CONFIG = {
         "min_price": 15000.0,
         "max_price": 45000.0,
         "sl_points": 65.0,
-        "exact_symbols": ["FINNIFTY", "NIFTY FIN SERVICE"],
+        "match_terms": ["NIFTY FIN SERVICE", "NIFTY FINANCIAL", "FINNIFTY"],
     },
     "MIDCAP NIFTY": {
         "env_id": (os.environ.get("MIDCAP_INST_ID") or "").strip(),
@@ -53,7 +53,7 @@ INDEX_CONFIG = {
         "min_price": 8000.0,
         "max_price": 25000.0,
         "sl_points": 40.0,
-        "exact_symbols": ["MIDCPNIFTY", "MIDCAP NIFTY", "NIFTY MID SELECT"],
+        "match_terms": ["NIFTY MID SELECT", "MIDCAP NIFTY", "MIDCPNIFTY"],
     },
     "SENSEX": {
         "env_id": (os.environ.get("SENSEX_INST_ID") or "").strip(),
@@ -61,7 +61,7 @@ INDEX_CONFIG = {
         "min_price": 50000.0,
         "max_price": 130000.0,
         "sl_points": 180.0,
-        "exact_symbols": ["SENSEX"],
+        "match_terms": ["SENSEX"],
     },
 }
 
@@ -117,7 +117,7 @@ def get_sahi_token() -> str | None:
     return None
 
 
-def resolve_instrument_ids(headers: dict) -> dict[str, str]:
+def resolve_spot_ids(headers: dict) -> dict[str, str]:
     resolved: dict[str, str] = {}
     missing = []
     for name, cfg in INDEX_CONFIG.items():
@@ -141,12 +141,18 @@ def resolve_instrument_ids(headers: dict) -> dict[str, str]:
         return resolved
 
     id_col = next((c for c in ("id", "instrument_id", "security_id", "token") if c in df.columns), None)
-    sym_col = next((c for c in ("symbol", "trading_symbol", "name", "display_name") if c in df.columns), None)
-    if not id_col or not sym_col:
+    if not id_col:
+        return resolved
+
+    search_cols = [c for c in ("symbol", "trading_symbol", "company_name", "display_name", "name") if c in df.columns]
+    if not search_cols:
         return resolved
 
     df_work = df.copy()
-    df_work["_sym_u"] = df_work[sym_col].fillna("").astype(str).str.strip().str.upper()
+    if "instrument_type" in df_work.columns:
+        idx_df = df_work[df_work["instrument_type"].fillna("").astype(str).str.strip().str.upper() == "IDX"]
+        if len(idx_df) > 0:
+            df_work = idx_df
 
     for name in missing:
         cfg = INDEX_CONFIG[name]
@@ -157,22 +163,35 @@ def resolve_instrument_ids(headers: dict) -> dict[str, str]:
             if len(ex_sub) > 0:
                 sub = ex_sub
 
-        exact_set = [s.upper() for s in cfg["exact_symbols"]]
-        matches = sub[sub["_sym_u"].isin(exact_set)]
-        if len(matches) == 0:
-            # Fallback: contains keyword, exclude obvious F&O contract suffixes
-            kw = exact_set[0]
-            matches = sub[
-                sub["_sym_u"].str.contains(kw, regex=False)
-                & (~sub["_sym_u"].str.endswith(("CE", "PE", "FUT")))
-            ]
+        matched_row = None
+        for term in cfg["match_terms"]:
+            t_up = term.upper()
+            for col in search_cols:
+                s = sub[col].fillna("").astype(str).str.strip().str.upper()
+                hits = sub[s == t_up]
+                if len(hits) > 0:
+                    matched_row = hits.iloc[0]
+                    break
+            if matched_row is not None:
+                break
 
-        if len(matches) > 0:
-            raw_val = matches.iloc[0][id_col]
-            if pd.notna(raw_val):
-                inst_id = str(raw_val).strip()
-                resolved[name] = inst_id
-                print(f"[{name}] ID -> {inst_id} ({matches.iloc[0][sym_col]})")
+        if matched_row is None:
+            for term in cfg["match_terms"]:
+                t_up = term.upper()
+                for col in search_cols:
+                    s = sub[col].fillna("").astype(str).str.strip().str.upper()
+                    hits = sub[s.str.contains(t_up, regex=False)]
+                    if len(hits) > 0:
+                        matched_row = hits.iloc[0]
+                        break
+                if matched_row is not None:
+                    break
+
+        if matched_row is not None and pd.notna(matched_row[id_col]):
+            inst_id = str(matched_row[id_col]).strip()
+            lbl = str(matched_row[search_cols[0]]).strip()
+            resolved[name] = inst_id
+            print(f"[{name}] Spot IDX -> {inst_id} ({lbl})")
 
     return resolved
 
@@ -239,19 +258,6 @@ def parse_candles(payload, min_p: float, max_p: float) -> pd.DataFrame | None:
     return df
 
 
-def parse_ltp(payload, inst_id: str, min_p: float, max_p: float) -> float | None:
-    if not isinstance(payload, dict):
-        return None
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        return None
-    item = data.get(str(inst_id)) or next(iter(data.values()), None)
-    if not isinstance(item, dict):
-        return None
-    raw = item.get("last_trade_price") or item.get("ltp") or item.get("last_price")
-    return normalize_price(raw, min_p, max_p)
-
-
 def parse_option_chain(payload) -> dict:
     default_oi = {"pcr": 1.0, "call_oi": 0.0, "put_oi": 0.0, "source": "Standard"}
     if not isinstance(payload, dict):
@@ -312,39 +318,9 @@ def fetch_market_data(symbol: str, cfg: dict, inst_id: str, headers: dict):
             except Exception:
                 df = None
 
-    time.sleep(1.0)
-
-    ltp_resp = safe_get(
-        f"{SAHI_API_BASE_URL}/v1/marketdata/ltp",
-        headers=headers,
-        params={"i": int(inst_id) if inst_id.isdigit() else inst_id},
-    )
-    ltp = None
-    if ltp_resp is not None:
-        print(f"[{symbol}] LTP HTTP {ltp_resp.status_code}")
-        if ltp_resp.status_code == 200:
-            try:
-                ltp = parse_ltp(ltp_resp.json(), inst_id, min_p, max_p)
-            except Exception:
-                ltp = None
-
-    if df is None and ltp is None:
-        print(f"[{symbol}] Valid live index price not available -> skipped safely.")
+    if df is None:
+        print(f"[{symbol}] Real 5m candles not available -> skipped.")
         return None, None
-
-    if df is None and ltp is not None:
-        spread = max(round(ltp * 0.0015, 2), 5.0)
-        df = pd.DataFrame({
-            "Open":   [ltp - 2 * spread, ltp - 1.5 * spread, ltp - 1.2 * spread, ltp - 0.8 * spread, ltp - 0.4 * spread, ltp - 0.2 * spread],
-            "High":   [ltp - spread,     ltp - 0.7 * spread, ltp - 0.5 * spread, ltp - 0.2 * spread, ltp + 0.1 * spread, ltp + 0.2 * spread],
-            "Low":    [ltp - 2.5 * spread, ltp - 2 * spread,   ltp - 1.7 * spread, ltp - 1.3 * spread, ltp - 0.9 * spread, ltp - 0.5 * spread],
-            "Close":  [ltp - 1.5 * spread, ltp - 1.2 * spread, ltp - 0.8 * spread, ltp - 0.4 * spread, ltp - 0.2 * spread, ltp],
-            "Volume": [100000, 125000, 110000, 140000, 155000, 180000],
-        })
-    elif df is not None and ltp is not None:
-        df.loc[df.index[-1], "Close"] = ltp
-        df.loc[df.index[-1], "High"] = max(float(df.loc[df.index[-1], "High"]), ltp)
-        df.loc[df.index[-1], "Low"] = min(float(df.loc[df.index[-1], "Low"]), ltp)
 
     time.sleep(1.0)
 
@@ -413,7 +389,7 @@ def build_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict):
         f"F&O Setup: {symbol} ({cfg['exchange']}) [{conviction}]\n"
         f"------------------------------------------\n"
         f"Side: {side}\n"
-        f"Entry / LTP: {entry:.2f}\n"
+        f"Entry / Close: {entry:.2f}\n"
         f"Stop Loss (SL): {sl:.2f}\n"
         f"Target 1 (0.50): {t1:.2f} | Target 2 (1.0): {t2:.2f} | Target 3 (1.618): {t3:.2f}\n"
         f"P1 Low: {p1_low:.2f} | P2 High: {p2_high:.2f} | Base: {p3_base:.2f}\n"
@@ -480,13 +456,13 @@ def main():
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    ids = resolve_instrument_ids(headers)
+    ids = resolve_spot_ids(headers)
     sent_count = 0
 
     for sym, cfg in INDEX_CONFIG.items():
         inst_id = ids.get(sym)
         if not inst_id:
-            print(f"[{sym}] Instrument ID missing -> skipped.")
+            print(f"[{sym}] Spot IDX ID not found -> skipped.")
             continue
 
         df, oi = fetch_market_data(sym, cfg, inst_id, headers)
