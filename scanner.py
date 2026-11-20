@@ -373,27 +373,18 @@ def get_swings(highs: np.ndarray, lows: np.ndarray):
 
 
 def build_fib_signal(symbol: str, cfg: dict, df: pd.DataFrame):
-    """
-    Returns (msg, row) if valid setup exists, or (None, None) when pullback fails to hold.
-    Rules:
-    - 3-Point Trend Fib with P3 = P1.
-    - First stage targets: 1.414 and 1.618 (plus 2.0 reference); if candle closes beyond 1.618,
-      next targets shift to 2.0, 2.272, 2.618.
-    - If rejected at a target, let price retrace to nearest swing's 0.5-0.618 zone:
-      hold/reject there -> new targets; fail to hold -> no signal (None).
-    """
     highs = df["High"].astype(float).values
     lows = df["Low"].astype(float).values
     closes = df["Close"].astype(float).values
     opens = df["Open"].astype(float).values
 
     h1, h2, l1, l2 = get_swings(highs, lows)
-    entry = float(closes[-1])
+    c_close = float(closes[-1])
+    entry = c_close
     c_open = float(opens[-1])
     c_high = float(highs[-1])
     c_low = float(lows[-1])
     p_close = float(closes[-2])
-    p_open = float(opens[-2])
     p_high = float(highs[-2])
     p_low = float(lows[-2])
     max_sl = float(cfg["sl_points"])
@@ -402,7 +393,6 @@ def build_fib_signal(symbol: str, cfg: dict, df: pd.DataFrame):
     is_downtrend = (h2 < h1) and (l2 < l1)
 
     if is_uptrend:
-        # P1 = l2, P2 = h2 (or recent high), P3 = P1 (l2)
         p1 = l2
         p2 = max(h2, float(np.max(highs[-10:])))
         p3 = p1
@@ -417,14 +407,12 @@ def build_fib_signal(symbol: str, cfg: dict, df: pd.DataFrame):
         t_2272 = round(p3 + 2.272 * leg, 2)
         t_2618 = round(p3 + 2.618 * leg, 2)
 
-        # Check if price rejected from target (touched/near target without closing past)
         rejected_at_target = (
             (p_high >= t_1414 and p_close <= t_1414 and c_close < p_high)
             or (c_high >= t_1414 and c_close < t_1414 and c_close < c_open)
         )
 
         if rejected_at_target:
-            # Allow pullback to nearest swing 0.5 - 0.618 zone
             z_top = max(fib_050, fib_0618)
             z_bot = min(fib_050, fib_0618)
             pad = max((z_top - z_bot) * 0.25, entry * 0.0005, 1.0)
@@ -436,7 +424,6 @@ def build_fib_signal(symbol: str, cfg: dict, df: pd.DataFrame):
                 return None, None
 
             if in_retrace_zone and (c_close >= c_open or c_low <= z_top):
-                # New base from 0.618/P3 for fresh leg
                 new_base = min(p3, z_bot)
                 new_leg = max(entry - new_base, leg * 0.6, 1.0)
                 t1 = round(entry + 1.414 * new_leg, 2)
@@ -446,16 +433,13 @@ def build_fib_signal(symbol: str, cfg: dict, df: pd.DataFrame):
                 side = "CALL (CE)"
                 logic = "Target Reject -> 0.5-0.618 Hold/Reject New Leg"
             else:
-                # Still pulling back toward 0.5-0.618; wait for zone hold/reject
                 print(f"[{symbol}] Target rejection -> pulling back toward 0.5-0.618 zone -> no signal yet.")
                 return None, None
         else:
-            # Closed above 1.618 -> next targets 2.0 and 2.272 (and 2.618)
             if p_close > t_1618 or c_close > t_1618:
                 t1, t2, t3 = t_2000, t_2272, t_2618
                 logic = "HH+HL + Closed >1.618 -> Next Targets 2 & 2.272"
             else:
-                # 0.5 rejection/hold -> first targets 1.414 to 1.618 (with 2.0)
                 t1, t2, t3 = t_1414, t_1618, t_2000
                 logic = "HH+HL + 0.5 Reject/Hold -> Targets 1.414-1.618 (P3=P1)"
 
@@ -464,7 +448,6 @@ def build_fib_signal(symbol: str, cfg: dict, df: pd.DataFrame):
             side = "CALL (CE)"
 
     elif is_downtrend:
-        # P1 = h2, P2 = l2 (or recent low), P3 = P1 (h2)
         p1 = h2
         p2 = min(l2, float(np.min(lows[-10:])))
         p3 = p1
@@ -520,7 +503,6 @@ def build_fib_signal(symbol: str, cfg: dict, df: pd.DataFrame):
             side = "PUT (PE)"
 
     else:
-        # No clear HH+HL or LH+LL trend -> check nearest swing 0.5-0.618 hold/reject
         leg = max(h2 - l2, round(entry * 0.002, 2), 1.0)
         z_050 = l2 + 0.50 * leg
         z_0618 = l2 + 0.618 * leg
