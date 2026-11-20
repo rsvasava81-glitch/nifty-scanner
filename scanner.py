@@ -10,276 +10,192 @@ import numpy as np
 IST = timezone(timedelta(hours=5, minutes=30))
 LOG_FILE = "trade_log.csv"
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+TELEGRAM_TOKEN = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+CHAT_ID = (os.environ.get("CHAT_ID") or "").strip()
 
-SAHI_AUTH_BASE_URL = (os.environ.get("SAHI_AUTH_BASE_URL") or "https://apis.sahi.com").rstrip("/")
-SAHI_API_BASE_URL = (os.environ.get("SAHI_API_BASE_URL") or "https://direct.sahi.com").rstrip("/")
+SAHI_AUTH_BASE_URL = (os.environ.get("SAHI_AUTH_BASE_URL") or "https://apis.sahi.com").strip().rstrip("/")
+SAHI_API_BASE_URL = (os.environ.get("SAHI_API_BASE_URL") or "https://direct.sahi.com").strip().rstrip("/")
 
-SAHI_KEY_ID = (
-    os.environ.get("SAHI_KEY_ID")
-    or os.environ.get("SAHI_API_KEY")
-    or os.environ.get("SAHI_ACCESS_TOKEN")
-)
-SAHI_SECRET = os.environ.get("SAHI_SECRET")
-EXPLICIT_ACCESS_TOKEN = os.environ.get("SAHI_ACCESS_TOKEN")
+SAHI_KEY_ID = (os.environ.get("SAHI_KEY_ID") or os.environ.get("SAHI_API_KEY") or "").strip()
+SAHI_SECRET = (os.environ.get("SAHI_SECRET") or "").strip()
+EXPLICIT_ACCESS_TOKEN = (os.environ.get("SAHI_ACCESS_TOKEN") or "").strip()
 
-ACTIVE_BEARER_TOKEN = None
+CACHED_TOKEN = None
 
-INSTRUMENT_MAP = {
+INDEX_CONFIG = {
     "NIFTY 50": {
-        "instrument_id": os.environ.get("NIFTY_INST_ID"),
+        "env_id": (os.environ.get("NIFTY_INST_ID") or "").strip(),
         "exchange": "NSE",
-        "sl_cap": 65.0,
-        "min_spot": 15000.0,
-        "max_spot": 40000.0,
-        "exact_names": ["NIFTY 50", "NIFTY50", "NIFTY INDEX"],
-        "keywords": ["NIFTY 50", "NIFTY50", "NIFTY"],
+        "min_price": 15000.0,
+        "max_price": 40000.0,
+        "sl_points": 55.0,
+        "exact_symbols": ["NIFTY 50", "NIFTY50", "NIFTY"],
     },
     "BANKNIFTY": {
-        "instrument_id": os.environ.get("BANKNIFTY_INST_ID"),
+        "env_id": (os.environ.get("BANKNIFTY_INST_ID") or "").strip(),
         "exchange": "NSE",
-        "sl_cap": 150.0,
-        "min_spot": 35000.0,
-        "max_spot": 95000.0,
-        "exact_names": ["BANKNIFTY", "NIFTY BANK", "NIFTYBANK"],
-        "keywords": ["BANKNIFTY", "NIFTY BANK"],
+        "min_price": 35000.0,
+        "max_price": 95000.0,
+        "sl_points": 140.0,
+        "exact_symbols": ["BANKNIFTY", "NIFTY BANK", "NIFTYBANK"],
     },
     "FINNIFTY": {
-        "instrument_id": os.environ.get("FINNIFTY_INST_ID"),
+        "env_id": (os.environ.get("FINNIFTY_INST_ID") or "").strip(),
         "exchange": "NSE",
-        "sl_cap": 70.0,
-        "min_spot": 15000.0,
-        "max_spot": 45000.0,
-        "exact_names": ["FINNIFTY", "NIFTY FIN SERVICE", "NIFTY FINANCIAL SERVICES"],
-        "keywords": ["FINNIFTY", "NIFTY FIN SERVICE"],
+        "min_price": 15000.0,
+        "max_price": 45000.0,
+        "sl_points": 65.0,
+        "exact_symbols": ["FINNIFTY", "NIFTY FIN SERVICE"],
     },
     "MIDCAP NIFTY": {
-        "instrument_id": os.environ.get("MIDCAP_INST_ID"),
+        "env_id": (os.environ.get("MIDCAP_INST_ID") or "").strip(),
         "exchange": "NSE",
-        "sl_cap": 45.0,
-        "min_spot": 8000.0,
-        "max_spot": 25000.0,
-        "exact_names": ["MIDCPNIFTY", "MIDCAP NIFTY", "NIFTY MID SELECT", "NIFTY MIDCAP SELECT"],
-        "keywords": ["MIDCPNIFTY", "MIDCAP NIFTY", "NIFTY MID SELECT"],
+        "min_price": 8000.0,
+        "max_price": 25000.0,
+        "sl_points": 40.0,
+        "exact_symbols": ["MIDCPNIFTY", "MIDCAP NIFTY", "NIFTY MID SELECT"],
     },
     "SENSEX": {
-        "instrument_id": os.environ.get("SENSEX_INST_ID"),
+        "env_id": (os.environ.get("SENSEX_INST_ID") or "").strip(),
         "exchange": "BSE",
-        "sl_cap": 200.0,
-        "min_spot": 50000.0,
-        "max_spot": 130000.0,
-        "exact_names": ["SENSEX"],
-        "keywords": ["SENSEX"],
+        "min_price": 50000.0,
+        "max_price": 130000.0,
+        "sl_points": 180.0,
+        "exact_symbols": ["SENSEX"],
     },
 }
 
 
-def send_telegram_alert(message: str) -> bool:
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("ERROR: TELEGRAM_BOT_TOKEN athva CHAT_ID set nathi.")
-        return False
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "disable_web_page_preview": True,
-    }
+def safe_get(url: str, headers: dict, params: dict | None = None, timeout: int = 15):
     try:
-        resp = requests.post(url, json=payload, timeout=15)
-        print("Telegram Status:", resp.status_code)
-        resp.raise_for_status()
-        return True
+        return requests.get(url, headers=headers, params=params, timeout=timeout)
     except Exception as e:
-        print("Telegram Send Error:", e)
-        return False
-
-
-def append_trade_log(row: dict):
-    fieldnames = [
-        "timestamp_ist",
-        "symbol",
-        "exchange",
-        "source",
-        "conviction",
-        "side",
-        "entry_close",
-        "stop_loss",
-        "p1_low",
-        "p2_high",
-        "base_0",
-        "achieved",
-        "next_target",
-        "vol_mult",
-        "body_pct",
-        "pcr",
-    ]
-    file_exists = os.path.isfile(LOG_FILE) and os.path.getsize(LOG_FILE) > 0
-    with open(LOG_FILE, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
-
-
-def extract_token(obj) -> str | None:
-    if isinstance(obj, str) and obj.strip():
-        return obj.strip()
-    if isinstance(obj, dict):
-        for k in ["access_token", "token", "bearer_token", "jwt", "accessToken"]:
-            if k in obj and obj[k]:
-                return str(obj[k]).strip()
-        for nested in ["data", "result", "payload"]:
-            if nested in obj:
-                found = extract_token(obj[nested])
-                if found:
-                    return found
-    return None
-
-
-def mint_sahi_token() -> str | None:
-    global ACTIVE_BEARER_TOKEN
-    if ACTIVE_BEARER_TOKEN:
-        return ACTIVE_BEARER_TOKEN
-
-    if EXPLICIT_ACCESS_TOKEN and EXPLICIT_ACCESS_TOKEN.strip():
-        ACTIVE_BEARER_TOKEN = EXPLICIT_ACCESS_TOKEN.strip()
-        print("Using SAHI_ACCESS_TOKEN from env.")
-        return ACTIVE_BEARER_TOKEN
-
-    if not SAHI_KEY_ID or not SAHI_SECRET:
-        print(f"Token Mint skipped: has_key_id={bool(SAHI_KEY_ID)}, has_secret={bool(SAHI_SECRET)}")
+        print(f"GET error [{url}]: {e}")
         return None
 
-    url = f"{SAHI_AUTH_BASE_URL}/api/v1/apikeys/token"
+
+def safe_post(url: str, headers: dict, payload: dict, timeout: int = 15):
     try:
-        payload = {"key_id": SAHI_KEY_ID.strip(), "secret": SAHI_SECRET.strip()}
-        resp = requests.post(
+        return requests.post(url, headers=headers, json=payload, timeout=timeout)
+    except Exception as e:
+        print(f"POST error [{url}]: {e}")
+        return None
+
+
+def get_sahi_token() -> str | None:
+    global CACHED_TOKEN
+    if CACHED_TOKEN:
+        return CACHED_TOKEN
+
+    if SAHI_KEY_ID and SAHI_SECRET:
+        url = f"{SAHI_AUTH_BASE_URL}/api/v1/apikeys/token"
+        resp = safe_post(
             url,
-            json=payload,
             headers={"Accept": "application/json", "Content-Type": "application/json"},
-            timeout=15,
+            payload={"key_id": SAHI_KEY_ID, "secret": SAHI_SECRET},
         )
-        print(f"Token Mint [{url}] -> HTTP {resp.status_code}: {resp.text[:180]}")
-        if resp.status_code in (200, 201):
-            tok = extract_token(resp.json())
-            if tok:
-                ACTIVE_BEARER_TOKEN = tok
-                print("Successfully minted Sahi Bearer token.")
-                return ACTIVE_BEARER_TOKEN
-    except Exception as e:
-        print(f"Token Mint Exception ({url}): {e}")
+        if resp is not None:
+            print(f"Auth HTTP {resp.status_code}")
+            if resp.status_code in (200, 201):
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = {}
+                for obj in (data, data.get("data") if isinstance(data, dict) else None):
+                    if isinstance(obj, dict):
+                        for k in ("access_token", "token", "bearer_token", "jwt"):
+                            val = obj.get(k)
+                            if isinstance(val, str) and val.strip():
+                                CACHED_TOKEN = val.strip()
+                                return CACHED_TOKEN
 
+    if EXPLICIT_ACCESS_TOKEN:
+        CACHED_TOKEN = EXPLICIT_ACCESS_TOKEN
+        return CACHED_TOKEN
+
+    print("Auth missing: SAHI_KEY_ID/SAHI_SECRET or SAHI_ACCESS_TOKEN not set.")
     return None
 
 
-def sahi_headers() -> dict:
-    headers = {
-        "Accept": "application/json",
-    }
-    tok = ACTIVE_BEARER_TOKEN or mint_sahi_token()
-    if tok:
-        headers["Authorization"] = f"Bearer {tok}"
-    return headers
+def resolve_instrument_ids(headers: dict) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    missing = []
+    for name, cfg in INDEX_CONFIG.items():
+        if cfg["env_id"]:
+            resolved[name] = cfg["env_id"]
+        else:
+            missing.append(name)
 
-
-def looks_like_derivative_or_alt(sym_upper: str) -> bool:
-    # Avoid futures/options/expiry contracts or prefixed/suffixed alt symbols
-    if any(ch.isdigit() for ch in sym_upper) and sym_upper not in ("NIFTY 50", "NIFTY50"):
-        return True
-    if sym_upper.endswith(("CE", "PE", "FUT")) or "NOV26" in sym_upper or "DEC26" in sym_upper:
-        return True
-    if sym_upper.startswith(("AONE", "E")):
-        return True
-    return False
-
-
-def pick_best_instrument_row(sub_df: pd.DataFrame, sym_col: str, exact_names: list[str], keywords: list[str]):
-    upper_series = sub_df[sym_col].fillna("").astype(str).str.strip().str.upper()
-
-    # 1. Exact match first
-    for ex_name in exact_names:
-        exact_matches = sub_df[upper_series == ex_name.upper()]
-        if len(exact_matches) > 0:
-            return exact_matches.iloc[0]
-
-    # 2. Filter out derivatives/alt symbols and prefer spot/index
-    cand_df = sub_df[
-        upper_series.apply(lambda s: any(k.upper() in s for k in keywords) and not looks_like_derivative_or_alt(s))
-    ]
-    if len(cand_df) == 0:
-        cand_df = sub_df[upper_series.apply(lambda s: any(k.upper() in s for k in keywords))]
-    if len(cand_df) == 0:
-        return None
-
-    for col in ["instrument_type", "segment", "type", "series"]:
-        if col in cand_df.columns:
-            t_series = cand_df[col].fillna("").astype(str).str.upper()
-            idx_matches = cand_df[t_series.str.contains("INDEX|SPOT", regex=True)]
-            if len(idx_matches) > 0:
-                return idx_matches.iloc[0]
-
-    return cand_df.iloc[0]
-
-
-def auto_resolve_instrument_ids():
-    missing = [k for k, v in INSTRUMENT_MAP.items() if not v.get("instrument_id")]
     if not missing:
-        return
+        return resolved
 
-    scripmaster_urls = [
-        "https://assets.sahi.com/external/instruments.csv",
-        f"{SAHI_API_BASE_URL}/v1/marketdata/scripmaster",
-        f"{SAHI_API_BASE_URL}/v1/scripmaster",
-    ]
-    for url in scripmaster_urls:
-        try:
-            resp = requests.get(url, headers=sahi_headers(), timeout=20)
-            if resp.status_code != 200 or not resp.text:
-                continue
-            df_sm = pd.read_csv(io.StringIO(resp.text), low_memory=False)
-            id_col = next((c for c in ["id", "instrument_id", "security_id", "token"] if c in df_sm.columns), None)
-            sym_col = next((c for c in ["symbol", "trading_symbol", "name", "display_name"] if c in df_sm.columns), None)
-            if not id_col or not sym_col:
-                continue
+    resp = safe_get("https://assets.sahi.com/external/instruments.csv", headers=headers, timeout=20)
+    if resp is None or resp.status_code != 200 or not resp.text:
+        print("Instruments CSV unavailable.")
+        return resolved
 
-            for sym in missing:
-                exch = str(INSTRUMENT_MAP[sym]["exchange"] or "").upper()
-                exact_names = INSTRUMENT_MAP[sym].get("exact_names") or []
-                kws = INSTRUMENT_MAP[sym].get("keywords") or []
+    try:
+        df = pd.read_csv(io.StringIO(resp.text), low_memory=False)
+    except Exception as e:
+        print(f"Instruments CSV parse error: {e}")
+        return resolved
 
-                sub_df = df_sm
-                if "exchange" in df_sm.columns:
-                    ex_series = df_sm["exchange"].fillna("").astype(str).str.upper()
-                    ex_matches = df_sm[ex_series == exch]
-                    if len(ex_matches) > 0:
-                        sub_df = ex_matches
+    id_col = next((c for c in ("id", "instrument_id", "security_id", "token") if c in df.columns), None)
+    sym_col = next((c for c in ("symbol", "trading_symbol", "name", "display_name") if c in df.columns), None)
+    if not id_col or not sym_col:
+        return resolved
 
-                row = pick_best_instrument_row(sub_df, sym_col, exact_names, kws)
-                if row is not None and pd.notna(row[id_col]):
-                    found_id = str(row[id_col]).strip()
-                    found_sym = str(row[sym_col]).strip()
-                    INSTRUMENT_MAP[sym]["instrument_id"] = found_id
-                    print(f"[{sym}] Resolved instrument_id ({id_col}) -> {found_id} ({found_sym})")
-            return
-        except Exception as e:
-            print(f"Scripmaster lookup ({url}) skipped: {e}")
+    df_work = df.copy()
+    df_work["_sym_u"] = df_work[sym_col].fillna("").astype(str).str.strip().str.upper()
+
+    for name in missing:
+        cfg = INDEX_CONFIG[name]
+        exch = cfg["exchange"].upper()
+        sub = df_work
+        if "exchange" in df_work.columns:
+            ex_sub = df_work[df_work["exchange"].fillna("").astype(str).str.strip().str.upper() == exch]
+            if len(ex_sub) > 0:
+                sub = ex_sub
+
+        exact_set = [s.upper() for s in cfg["exact_symbols"]]
+        matches = sub[sub["_sym_u"].isin(exact_set)]
+        if len(matches) == 0:
+            # Fallback: contains keyword, exclude obvious F&O contract suffixes
+            kw = exact_set[0]
+            matches = sub[
+                sub["_sym_u"].str.contains(kw, regex=False)
+                & (~sub["_sym_u"].str.endswith(("CE", "PE", "FUT")))
+            ]
+
+        if len(matches) > 0:
+            raw_val = matches.iloc[0][id_col]
+            if pd.notna(raw_val):
+                inst_id = str(raw_val).strip()
+                resolved[name] = inst_id
+                print(f"[{name}] ID -> {inst_id} ({matches.iloc[0][sym_col]})")
+
+    return resolved
 
 
-def convert_paise_if_needed(val: float, min_spot: float, max_spot: float) -> float | None:
-    if min_spot <= val <= max_spot:
-        return round(val, 2)
-    as_rupees = val / 100.0
-    if min_spot <= as_rupees <= max_spot:
-        return round(as_rupees, 2)
+def normalize_price(val: float, min_p: float, max_p: float) -> float | None:
+    try:
+        x = float(val)
+    except Exception:
+        return None
+    if x <= 0:
+        return None
+    if min_p <= x <= max_p:
+        return round(x, 2)
+    as_rs = x / 100.0
+    if min_p <= as_rs <= max_p:
+        return round(as_rs, 2)
     return None
 
 
-def parse_candles_payload(payload_json, min_spot: float, max_spot: float) -> pd.DataFrame | None:
-    if not isinstance(payload_json, dict):
+def parse_candles(payload, min_p: float, max_p: float) -> pd.DataFrame | None:
+    if not isinstance(payload, dict):
         return None
-    rows = payload_json.get("data") or payload_json.get("candles") or payload_json.get("ohlc") or []
+    rows = payload.get("candles") or payload.get("data") or payload.get("ohlc") or []
     if isinstance(rows, dict):
         rows = rows.get("candles") or rows.get("data") or []
     if not isinstance(rows, list) or len(rows) < 6:
@@ -287,315 +203,303 @@ def parse_candles_payload(payload_json, min_spot: float, max_spot: float) -> pd.
 
     if isinstance(rows[0], dict):
         df = pd.DataFrame(rows)
-        rename_map = {
+        col_map = {
             "open": "Open", "o": "Open",
             "high": "High", "h": "High",
             "low": "Low", "l": "Low",
             "close": "Close", "c": "Close",
             "volume": "Volume", "v": "Volume",
         }
-        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+        df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
     elif isinstance(rows[0], (list, tuple)) and len(rows[0]) >= 5:
-        cols = ["Time", "Open", "High", "Low", "Close", "Volume"][: len(rows[0])]
-        df = pd.DataFrame(rows, columns=cols)
+        df = pd.DataFrame(rows, columns=["Time", "Open", "High", "Low", "Close", "Volume"][: len(rows[0])])
     else:
         return None
 
-    for col in ["Open", "High", "Low", "Close"]:
-        if col not in df.columns:
+    for c in ("Open", "High", "Low", "Close"):
+        if c not in df.columns:
             return None
-        s = pd.to_numeric(df[col], errors="coerce")
+        s = pd.to_numeric(df[c], errors="coerce")
         med = float(s.dropna().median()) if len(s.dropna()) > 0 else 0.0
-        if med > max_spot:
+        if med > max_p:
             s = s / 100.0
-        df[col] = s
+        df[c] = s
 
     if "Volume" not in df.columns:
         df["Volume"] = 100000.0
     df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(100000.0)
 
-    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["High", "Low", "Close"]).tail(40).reset_index(drop=True)
+    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna().tail(30).reset_index(drop=True)
     if len(df) < 6:
         return None
 
-    last_c = float(df["Close"].iloc[-1])
-    if not (min_spot <= last_c <= max_spot):
+    last_close = normalize_price(float(df["Close"].iloc[-1]), min_p, max_p)
+    if last_close is None:
         return None
     return df
 
 
-def extract_valid_ltp(payload_json, inst_id: str, min_spot: float, max_spot: float) -> float | None:
-    if not isinstance(payload_json, dict):
+def parse_ltp(payload, inst_id: str, min_p: float, max_p: float) -> float | None:
+    if not isinstance(payload, dict):
         return None
-    data = payload_json.get("data")
+    data = payload.get("data")
     if not isinstance(data, dict):
         return None
-    entry = data.get(str(inst_id)) or next(iter(data.values()), None)
-    if not isinstance(entry, dict):
+    item = data.get(str(inst_id)) or next(iter(data.values()), None)
+    if not isinstance(item, dict):
         return None
-    raw_ltp = entry.get("last_trade_price") or entry.get("ltp") or entry.get("last_price")
-    if raw_ltp is None:
-        return None
-    try:
-        val = float(raw_ltp)
-    except Exception:
-        return None
-    return convert_paise_if_needed(val, min_spot, max_spot)
+    raw = item.get("last_trade_price") or item.get("ltp") or item.get("last_price")
+    return normalize_price(raw, min_p, max_p)
 
 
-def parse_oi_payload(payload_json) -> dict | None:
-    if not isinstance(payload_json, dict):
-        return None
-    raw = payload_json.get("data") or payload_json.get("chain") or payload_json.get("option_chain") or []
-    chain = raw.get("chain") if isinstance(raw, dict) else raw
-    if not isinstance(chain, list) or len(chain) == 0:
-        return None
+def parse_option_chain(payload) -> dict:
+    default_oi = {"pcr": 1.0, "call_oi": 0.0, "put_oi": 0.0, "source": "Standard"}
+    if not isinstance(payload, dict):
+        return default_oi
+    raw = payload.get("data") or payload.get("chain") or payload.get("option_chain") or []
+    rows = raw.get("chain") if isinstance(raw, dict) else raw
+    if not isinstance(rows, list) or not rows:
+        return default_oi
 
-    total_call_oi = 0.0
-    total_put_oi = 0.0
-    for row in chain:
-        if not isinstance(row, dict):
+    call_oi = 0.0
+    put_oi = 0.0
+    for r in rows:
+        if not isinstance(r, dict):
             continue
-        ce = row.get("CE") or row.get("ce") or row.get("call") or {}
-        pe = row.get("PE") or row.get("pe") or row.get("put") or {}
+        ce = r.get("CE") or r.get("ce") or r.get("call") or {}
+        pe = r.get("PE") or r.get("pe") or r.get("put") or {}
         if isinstance(ce, dict):
-            total_call_oi += float(ce.get("oi") or ce.get("open_interest") or ce.get("OI") or 0.0)
+            call_oi += float(ce.get("oi") or ce.get("open_interest") or 0.0)
         if isinstance(pe, dict):
-            total_put_oi += float(pe.get("oi") or pe.get("open_interest") or pe.get("OI") or 0.0)
+            put_oi += float(pe.get("oi") or pe.get("open_interest") or 0.0)
 
-    if total_call_oi <= 0 and total_put_oi <= 0:
-        return None
+    if call_oi <= 0 and put_oi <= 0:
+        return default_oi
 
-    pcr = round(total_put_oi / max(total_call_oi, 1.0), 2)
     return {
-        "pcr": pcr,
-        "call_oi": round(total_call_oi / 100000.0, 2),
-        "put_oi": round(total_put_oi / 100000.0, 2),
-        "source": "Sahi Live OC",
+        "pcr": round(put_oi / max(call_oi, 1.0), 2),
+        "call_oi": round(call_oi / 100000.0, 2),
+        "put_oi": round(put_oi / 100000.0, 2),
+        "source": "Sahi OC",
     }
 
 
-def fetch_sahi_candles_and_oi(symbol: str, cfg: dict):
-    inst_id = cfg.get("instrument_id")
-    min_spot = float(cfg.get("min_spot", 1000.0))
-    max_spot = float(cfg.get("max_spot", 500000.0))
-    token = mint_sahi_token()
+def fetch_market_data(symbol: str, cfg: dict, inst_id: str, headers: dict):
+    min_p = cfg["min_price"]
+    max_p = cfg["max_price"]
 
-    if not token or not inst_id:
-        print(f"[{symbol}] Skipping signal: missing token or instrument_id (token={bool(token)}, inst_id={inst_id})")
-        return None, None
+    now_ist = datetime.now(IST)
+    from_ist = now_ist - timedelta(days=5)
 
-    try:
-        now_dt = datetime.now(IST)
-        from_dt = now_dt - timedelta(days=3)
-        c_url = f"{SAHI_API_BASE_URL}/v1/marketdata/candles"
-
-        # Single call with ISO timestamps; fallback once to epoch if needed
-        c_params = {
-            "i": int(inst_id),
-            "instrument_id": int(inst_id),
+    c_resp = safe_get(
+        f"{SAHI_API_BASE_URL}/v1/marketdata/candles",
+        headers=headers,
+        params={
+            "i": int(inst_id) if inst_id.isdigit() else inst_id,
+            "instrument_id": int(inst_id) if inst_id.isdigit() else inst_id,
             "size": "5m",
-            "from": from_dt.isoformat(),
-            "to": now_dt.isoformat(),
-        }
-        c_resp = requests.get(c_url, headers=sahi_headers(), params=c_params, timeout=15)
-        print(f"[{symbol}] Sahi Candles (size=5m, ISO) HTTP {c_resp.status_code}: {c_resp.text[:220]}")
+            "from": from_ist.strftime("%Y-%m-%d"),
+            "to": now_ist.strftime("%Y-%m-%d"),
+        },
+    )
 
-        if c_resp.status_code == 400 and "from" in c_resp.text.lower():
-            time.sleep(1.0)
-            c_params_epoch = {
-                "i": int(inst_id),
-                "instrument_id": int(inst_id),
-                "size": "5m",
-                "from": int(from_dt.timestamp()),
-                "to": int(now_dt.timestamp()),
-            }
-            c_resp = requests.get(c_url, headers=sahi_headers(), params=c_params_epoch, timeout=15)
-            print(f"[{symbol}] Sahi Candles (size=5m, epoch) HTTP {c_resp.status_code}: {c_resp.text[:220]}")
+    df = None
+    if c_resp is not None:
+        print(f"[{symbol}] Candles HTTP {c_resp.status_code}")
+        if c_resp.status_code == 200:
+            try:
+                df = parse_candles(c_resp.json(), min_p, max_p)
+            except Exception:
+                df = None
 
-        df = parse_candles_payload(c_resp.json(), min_spot, max_spot) if c_resp.status_code == 200 else None
+    time.sleep(1.0)
 
-        time.sleep(1.0)
+    ltp_resp = safe_get(
+        f"{SAHI_API_BASE_URL}/v1/marketdata/ltp",
+        headers=headers,
+        params={"i": int(inst_id) if inst_id.isdigit() else inst_id},
+    )
+    ltp = None
+    if ltp_resp is not None:
+        print(f"[{symbol}] LTP HTTP {ltp_resp.status_code}")
+        if ltp_resp.status_code == 200:
+            try:
+                ltp = parse_ltp(ltp_resp.json(), inst_id, min_p, max_p)
+            except Exception:
+                ltp = None
 
-        ltp_url = f"{SAHI_API_BASE_URL}/v1/marketdata/ltp"
-        ltp_resp = requests.get(ltp_url, headers=sahi_headers(), params={"i": int(inst_id)}, timeout=15)
-        print(f"[{symbol}] Sahi LTP HTTP {ltp_resp.status_code}: {ltp_resp.text[:220]}")
-        valid_ltp = extract_valid_ltp(ltp_resp.json(), str(inst_id), min_spot, max_spot) if ltp_resp.status_code == 200 else None
-
-        if df is not None and valid_ltp is not None:
-            df.loc[df.index[-1], "Close"] = valid_ltp
-            df.loc[df.index[-1], "High"] = max(float(df.loc[df.index[-1], "High"]), valid_ltp)
-            df.loc[df.index[-1], "Low"] = min(float(df.loc[df.index[-1], "Low"]), valid_ltp)
-        elif df is None and valid_ltp is not None:
-            step = max(valid_ltp * 0.001, 5.0)
-            df = pd.DataFrame({
-                "Open":   [valid_ltp - 1.5 * step, valid_ltp - 1.0 * step, valid_ltp - 0.8 * step, valid_ltp - 0.5 * step, valid_ltp - 0.2 * step, valid_ltp - 0.1 * step],
-                "High":   [valid_ltp - 0.8 * step, valid_ltp - 0.4 * step, valid_ltp - 0.2 * step, valid_ltp + 0.1 * step, valid_ltp + 0.2 * step, valid_ltp + 0.15 * step],
-                "Low":    [valid_ltp - 2.0 * step, valid_ltp - 1.4 * step, valid_ltp - 1.2 * step, valid_ltp - 0.9 * step, valid_ltp - 0.6 * step, valid_ltp - 0.3 * step],
-                "Close":  [valid_ltp - 1.0 * step, valid_ltp - 0.8 * step, valid_ltp - 0.5 * step, valid_ltp - 0.2 * step, valid_ltp - 0.1 * step, valid_ltp],
-                "Volume": [100000, 120000, 110000, 130000, 140000, 160000],
-            })
-        elif df is None:
-            print(f"[{symbol}] No valid spot price in range [{min_spot}..{max_spot}] -> skipping alert.")
-            return None, None
-
-        time.sleep(1.0)
-
-        oc_url = f"{SAHI_API_BASE_URL}/v1/marketdata/optionchain"
-        oc_params = {"underlying_id": int(inst_id), "i": int(inst_id), "instrument_id": int(inst_id)}
-        oc_resp = requests.get(oc_url, headers=sahi_headers(), params=oc_params, timeout=15)
-        print(f"[{symbol}] Sahi OC HTTP {oc_resp.status_code}: {oc_resp.text[:220]}")
-        oi_summary = parse_oi_payload(oc_resp.json()) if oc_resp.status_code == 200 else None
-        if oi_summary is None:
-            oi_summary = {"pcr": 1.0, "call_oi": 0.0, "put_oi": 0.0, "source": "No Live OC"}
-
-        return df, oi_summary
-    except Exception as e:
-        print(f"[{symbol}] Sahi API Exception: {e}")
+    if df is None and ltp is None:
+        print(f"[{symbol}] Valid live index price not available -> skipped safely.")
         return None, None
 
+    if df is None and ltp is not None:
+        spread = max(round(ltp * 0.0015, 2), 5.0)
+        df = pd.DataFrame({
+            "Open":   [ltp - 2 * spread, ltp - 1.5 * spread, ltp - 1.2 * spread, ltp - 0.8 * spread, ltp - 0.4 * spread, ltp - 0.2 * spread],
+            "High":   [ltp - spread,     ltp - 0.7 * spread, ltp - 0.5 * spread, ltp - 0.2 * spread, ltp + 0.1 * spread, ltp + 0.2 * spread],
+            "Low":    [ltp - 2.5 * spread, ltp - 2 * spread,   ltp - 1.7 * spread, ltp - 1.3 * spread, ltp - 0.9 * spread, ltp - 0.5 * spread],
+            "Close":  [ltp - 1.5 * spread, ltp - 1.2 * spread, ltp - 0.8 * spread, ltp - 0.4 * spread, ltp - 0.2 * spread, ltp],
+            "Volume": [100000, 125000, 110000, 140000, 155000, 180000],
+        })
+    elif df is not None and ltp is not None:
+        df.loc[df.index[-1], "Close"] = ltp
+        df.loc[df.index[-1], "High"] = max(float(df.loc[df.index[-1], "High"]), ltp)
+        df.loc[df.index[-1], "Low"] = min(float(df.loc[df.index[-1], "Low"]), ltp)
 
-def analyze_footprint_and_oi(df: pd.DataFrame, oi: dict):
-    vol = df["Volume"].astype(float).values
+    time.sleep(1.0)
+
+    oc_resp = safe_get(
+        f"{SAHI_API_BASE_URL}/v1/marketdata/optionchain",
+        headers=headers,
+        params={"underlying_id": int(inst_id) if inst_id.isdigit() else inst_id},
+    )
+    oi = {"pcr": 1.0, "call_oi": 0.0, "put_oi": 0.0, "source": "Standard"}
+    if oc_resp is not None and oc_resp.status_code == 200:
+        try:
+            oi = parse_option_chain(oc_resp.json())
+        except Exception:
+            pass
+
+    return df, oi
+
+
+def build_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict):
+    highs = df["High"].astype(float).values
+    lows = df["Low"].astype(float).values
+    closes = df["Close"].astype(float).values
     opens = df["Open"].astype(float).values
-    highs = df["High"].astype(float).values
-    lows = df["Low"].astype(float).values
-    closes = df["Close"].astype(float).values
+    vols = df["Volume"].astype(float).values
 
-    avg_vol = np.mean(vol[:-1]) if len(vol) > 1 else vol[-1]
-    vol_mult = round(float(vol[-1] / avg_vol), 2) if avg_vol > 0 else 1.0
-
-    rng = max(float(highs[-1] - lows[-1]), 1e-5)
-    body_pct = int(round(min(100.0, (abs(float(closes[-1] - opens[-1])) / rng) * 100.0)))
-    bull_candle = bool(closes[-1] > opens[-1])
-    footprint_ok = (vol_mult >= 1.25) and (body_pct >= 45)
-
-    pcr = float(oi.get("pcr", 1.0))
-    if pcr >= 1.05:
-        oi_bias = "BULLISH (Put Support)"
-    elif pcr <= 0.85:
-        oi_bias = "BEARISH (Call Resistance)"
-    else:
-        oi_bias = "NEUTRAL"
-
-    return vol_mult, body_pct, bull_candle, footprint_ok, pcr, oi_bias
-
-
-def generate_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict):
-    highs = df["High"].astype(float).values
-    lows = df["Low"].astype(float).values
-    closes = df["Close"].astype(float).values
     n = len(df)
-
     p1_idx = int(np.argmin(lows[: max(1, n // 2)]))
     p1_low = float(lows[p1_idx])
 
-    p2_slice = highs[p1_idx:]
-    p2_idx = p1_idx + int(np.argmax(p2_slice))
+    p2_idx = p1_idx + int(np.argmax(highs[p1_idx:]))
     p2_high = float(highs[p2_idx])
 
     p3_slice = lows[p2_idx:]
     p3_base = float(np.min(p3_slice)) if len(p3_slice) > 0 else float(np.min(lows[-2:]))
 
-    current_close = float(closes[-1])
-    impulse_range = max(p2_high - p1_low, 1.0)
-    sl_cap = float(cfg.get("sl_cap", 65.0))
-    min_gap = max(impulse_range * 0.15, round(current_close * 0.002, 2), 1.0)
+    entry = float(closes[-1])
+    swing = max(p2_high - p1_low, round(entry * 0.002, 2), 1.0)
+    sl_dist = min(float(cfg["sl_points"]), max(swing * 0.25, round(entry * 0.0015, 2), 10.0))
 
-    vol_mult, body_pct, bull_candle, footprint_ok, pcr, oi_bias = analyze_footprint_and_oi(df, oi)
+    avg_vol = float(np.mean(vols[:-1])) if len(vols) > 1 else float(vols[-1])
+    vol_mult = round(float(vols[-1] / max(avg_vol, 1.0)), 2)
+    candle_rng = max(float(highs[-1] - lows[-1]), 1e-5)
+    body_pct = int(round(min(100.0, (abs(float(closes[-1] - opens[-1])) / candle_rng) * 100.0)))
 
-    bull_pts = (1 if current_close >= p3_base else 0) + (1 if bull_candle else 0) + (2 if "BULLISH" in oi_bias else 0)
-    bear_pts = (1 if current_close < p3_base else 0) + (0 if bull_candle else 1) + (2 if "BEARISH" in oi_bias else 0)
+    pcr = float(oi.get("pcr", 1.0))
+    bullish = (closes[-1] >= opens[-1]) and (pcr >= 0.90)
 
-    if bull_pts >= bear_pts:
+    if bullish:
         side = "CALL (CE) SIDE ENTRY"
-        base_ref = p3_base if p3_base < current_close - min_gap else (current_close - impulse_range * 0.25)
-        raw_sl = current_close - min(sl_cap, max(min_gap, current_close - base_ref))
-        sl = round(min(raw_sl, current_close - min_gap), 2)
-
-        t_05 = current_close + impulse_range * 0.50
-        t_0618 = current_close + impulse_range * 0.618
-        t_1414 = current_close + impulse_range * 1.414
-        t_1618 = current_close + impulse_range * 1.618
-        t_200 = current_close + impulse_range * 2.00
-
-        if current_close >= t_1618:
-            achieved, next_target = "1.618", f"{t_200:.2f} (2.0 Ext)"
-        elif current_close >= t_1414:
-            achieved, next_target = "1.414", f"{t_1618:.2f} (1.618 Ext)"
-        elif current_close >= t_0618:
-            achieved, next_target = "0.618", f"{t_1414:.2f} (1.414 Ext)"
-        else:
-            achieved, next_target = "Base / Pullback", f"{t_05:.2f} (0.50 Ext)"
+        sl = round(entry - sl_dist, 2)
+        t1 = round(entry + swing * 0.50, 2)
+        t2 = round(entry + swing * 1.00, 2)
+        t3 = round(entry + swing * 1.618, 2)
+        bias = "BULLISH" if pcr >= 1.05 else "NEUTRAL-BULL"
     else:
         side = "PUT (PE) SIDE ENTRY"
-        top_ref = p2_high if p2_high > current_close + min_gap else (current_close + impulse_range * 0.25)
-        raw_sl = current_close + min(sl_cap, max(min_gap, top_ref - current_close))
-        sl = round(max(raw_sl, current_close + min_gap), 2)
+        sl = round(entry + sl_dist, 2)
+        t1 = round(entry - swing * 0.50, 2)
+        t2 = round(entry - swing * 1.00, 2)
+        t3 = round(entry - swing * 1.618, 2)
+        bias = "BEARISH" if pcr <= 0.85 else "NEUTRAL-BEAR"
 
-        t_05 = current_close - impulse_range * 0.50
-        t_0618 = current_close - impulse_range * 0.618
-        t_1414 = current_close - impulse_range * 1.414
-        t_1618 = current_close - impulse_range * 1.618
-        t_200 = current_close - impulse_range * 2.00
+    conviction = "HIGH CONVICTION" if (vol_mult >= 1.25 and body_pct >= 45) else "MODERATE"
 
-        if current_close <= t_1618:
-            achieved, next_target = "1.618", f"{t_200:.2f} (2.0 Ext)"
-        elif current_close <= t_1414:
-            achieved, next_target = "1.414", f"{t_1618:.2f} (1.618 Ext)"
-        elif current_close <= t_0618:
-            achieved, next_target = "0.618", f"{t_1414:.2f} (1.414 Ext)"
-        else:
-            achieved, next_target = "Top / Pullback", f"{t_05:.2f} (0.50 Ext)"
-
-    tag = "HIGH CONVICTION" if (footprint_ok and oi_bias != "NEUTRAL") else "MODERATE"
-    src = oi.get("source", "OC")
     msg = (
-        f"F&O Setup: {symbol} ({cfg['exchange']}) [{tag}]\n"
+        f"F&O Setup: {symbol} ({cfg['exchange']}) [{conviction}]\n"
         f"------------------------------------------\n"
         f"Side: {side}\n"
-        f"Entry / Close: {current_close:.2f}\n"
+        f"Entry / LTP: {entry:.2f}\n"
         f"Stop Loss (SL): {sl:.2f}\n"
+        f"Target 1 (0.50): {t1:.2f} | Target 2 (1.0): {t2:.2f} | Target 3 (1.618): {t3:.2f}\n"
         f"P1 Low: {p1_low:.2f} | P2 High: {p2_high:.2f} | Base: {p3_base:.2f}\n"
-        f"Achieved Level: {achieved}\n"
-        f"Next Target: {next_target}\n"
         f"Footprint: Vol x{vol_mult} | Body {body_pct}%\n"
-        f"Option Chain ({src}): PCR {pcr:.2f} | {oi_bias} | Call {oi.get('call_oi', 0):.1f}L / Put {oi.get('put_oi', 0):.1f}L"
+        f"OI ({oi.get('source', 'Standard')}): PCR {pcr:.2f} | {bias}"
     )
-    log_row = {
+
+    row = {
         "timestamp_ist": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
         "symbol": symbol,
         "exchange": cfg["exchange"],
-        "source": src,
-        "conviction": tag,
+        "source": oi.get("source", "Standard"),
+        "conviction": conviction,
         "side": side,
-        "entry_close": round(current_close, 2),
-        "stop_loss": round(sl, 2),
+        "entry_close": round(entry, 2),
+        "stop_loss": sl,
         "p1_low": round(p1_low, 2),
         "p2_high": round(p2_high, 2),
         "base_0": round(p3_base, 2),
-        "achieved": achieved,
-        "next_target": next_target,
+        "achieved": "Entry Zone",
+        "next_target": f"{t1:.2f} (T1)",
         "vol_mult": vol_mult,
         "body_pct": body_pct,
         "pcr": pcr,
     }
-    return msg, log_row
+    return msg, row
+
+
+def send_telegram(msg: str) -> bool:
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        print("Telegram env missing.")
+        return False
+    resp = safe_post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        headers={"Content-Type": "application/json"},
+        payload={"chat_id": CHAT_ID, "text": msg, "disable_web_page_preview": True},
+    )
+    if resp is None:
+        return False
+    print(f"Telegram HTTP {resp.status_code}")
+    return 200 <= resp.status_code < 300
+
+
+def save_log(row: dict):
+    cols = [
+        "timestamp_ist", "symbol", "exchange", "source", "conviction", "side",
+        "entry_close", "stop_loss", "p1_low", "p2_high", "base_0",
+        "achieved", "next_target", "vol_mult", "body_pct", "pcr",
+    ]
+    exists = os.path.isfile(LOG_FILE) and os.path.getsize(LOG_FILE) > 0
+    try:
+        with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            if not exists:
+                w.writeheader()
+            w.writerow(row)
+    except Exception as e:
+        print(f"CSV log error: {e}")
 
 
 def main():
-    auto_resolve_instrument_ids()
-    sent = 0
-    for sym, cfg in INSTRUMENT_MAP.items():
-        df, oi = fetch_sahi_candles_and_oi(sym, cfg)
+    token = get_sahi_token()
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    ids = resolve_instrument_ids(headers)
+    sent_count = 0
+
+    for sym, cfg in INDEX_CONFIG.items():
+        inst_id = ids.get(sym)
+        if not inst_id:
+            print(f"[{sym}] Instrument ID missing -> skipped.")
+            continue
+
+        df, oi = fetch_market_data(sym, cfg, inst_id, headers)
         if df is None or oi is None:
             continue
-        msg, log_row = generate_signal(sym, cfg, df, oi)
-        append_trade_log(log_row)
-        if send_telegram_alert(msg):
-            sent += 1
+
+        msg, row = build_signal(sym, cfg, df, oi)
+        save_log(row)
+        if send_telegram(msg):
+            sent_count += 1
         time.sleep(2.0)
-    print(f"Sent {sent}/{len(INSTRUMENT_MAP)} alerts and updated {LOG_FILE}.")
+
+    print(f"Done. Alerts sent: {sent_count}/{len(INDEX_CONFIG)}")
 
 
 if __name__ == "__main__":
