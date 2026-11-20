@@ -499,4 +499,32 @@ def save_log(row: dict):
 def main():
     print("Scanner started...")
     token = get_sahi_token()
-    headers =
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    ids = resolve_spot_ids(headers)
+    sent_count = 0
+
+    for sym, cfg in INDEX_CONFIG.items():
+        inst_id = ids.get(sym)
+        if not inst_id:
+            print(f"[{sym}] Spot IDX ID not found -> skipped.")
+            continue
+
+        df, oi = fetch_market_data(sym, cfg, inst_id, headers)
+        if df is None or oi is None:
+            time.sleep(5.0)
+            continue
+
+        msg, row = build_signal(sym, cfg, df, oi)
+        save_log(row)
+        if send_telegram(msg):
+            sent_count += 1
+        time.sleep(6.0)
+
+    print(f"Done. Alerts sent: {sent_count}/{len(INDEX_CONFIG)}")
+
+
+if __name__ == "__main__":
+    main()
