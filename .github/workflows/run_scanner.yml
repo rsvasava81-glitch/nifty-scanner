@@ -2,11 +2,11 @@ name: Market Breakout Scanner
 
 on:
   schedule:
-    - cron: "*/5 3-10 * * 1-5" # Every 5 mins during Indian market hours (UTC 03:45-10:00 ≈ IST 09:15-15:30)
+    - cron: "*/5 3-10 * * 1-5"
   workflow_dispatch: {}
 
 permissions:
-  contents: write # Required so GitHub Actions can push updates to trade_log.csv
+  contents: write
 
 jobs:
   run-scanner:
@@ -29,10 +29,13 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          SAHI_AUTH_BASE_URL: ${{ secrets.SAHI_AUTH_BASE_URL }}
+          SAHI_API_BASE_URL: ${{ secrets.SAHI_API_BASE_URL }}
           SAHI_BASE_URL: ${{ secrets.SAHI_BASE_URL }}
           SAHI_ACCESS_TOKEN: ${{ secrets.SAHI_ACCESS_TOKEN }}
           SAHI_API_KEY: ${{ secrets.SAHI_API_KEY }}
           SAHI_KEY_ID: ${{ secrets.SAHI_KEY_ID }}
+          SAHI_SECRET: ${{ secrets.SAHI_SECRET }}
           NIFTY_INST_ID: ${{ secrets.NIFTY_INST_ID }}
           BANKNIFTY_INST_ID: ${{ secrets.BANKNIFTY_INST_ID }}
           FINNIFTY_INST_ID: ${{ secrets.FINNIFTY_INST_ID }}
@@ -42,8 +45,8 @@ jobs:
 
       - name: Commit updated trade_log.csv
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
           git add trade_log.csv
-          git diff --staged --quiet || git commit -m "Update trade_log.csv [skip ci]"
+          git diff --staged --quiet || git commit -m "Update trade_log.csv"
           git push
