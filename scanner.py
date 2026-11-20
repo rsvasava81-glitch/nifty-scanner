@@ -310,46 +310,56 @@ def fetch_market_data(symbol: str, cfg: dict, inst_id: str, headers: dict):
     from_ist = (now_ist - timedelta(days=5)).replace(hour=9, minute=15, second=0, microsecond=0)
     to_ist = now_ist.replace(microsecond=0)
 
-    f_str = from_ist.strftime("%Y-%m-%d %H:%M:%S")
-    t_str = to_ist.strftime("%Y-%m-%d %H:%M:%S")
+    from_utc = from_ist.astimezone(timezone.utc)
+    to_utc = to_ist.astimezone(timezone.utc)
+
+    fmt_candidates = [
+        ("iso_ist", from_ist.strftime("%Y-%m-%dT%H:%M:%S+05:30"), to_ist.strftime("%Y-%m-%dT%H:%M:%S+05:30")),
+        ("iso_z", from_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), to_utc.strftime("%Y-%m-%dT%H:%M:%SZ")),
+        ("epoch_s", str(int(from_ist.timestamp())), str(int(to_ist.timestamp()))),
+        ("epoch_ms", str(int(from_ist.timestamp() * 1000)), str(int(to_ist.timestamp() * 1000))),
+    ]
+
     id_val = int(inst_id) if inst_id.isdigit() else inst_id
-
     df = None
-    for attempt in range(3):
-        c_resp = safe_get(
-            f"{SAHI_API_BASE_URL}/v1/marketdata/candles",
-            headers=headers,
-            params={
-                "i": id_val,
-                "size": "5m",
-                "from": f_str,
-                "to": t_str,
-            },
-        )
-        if c_resp is None:
-            time.sleep(3.0)
-            continue
 
-        print(f"[{symbol}] Candles HTTP {c_resp.status_code}")
-        if c_resp.status_code == 429:
-            wait_sec = 10.0 * (attempt + 1)
-            print(f"[{symbol}] Rate limited -> waiting {wait_sec:.0f}s...")
-            time.sleep(wait_sec)
-            continue
+    for tag, f_val, t_val in fmt_candidates:
+        for attempt in range(2):
+            c_resp = safe_get(
+                f"{SAHI_API_BASE_URL}/v1/marketdata/candles",
+                headers=headers,
+                params={
+                    "i": id_val,
+                    "size": "5m",
+                    "from": f_val,
+                    "to": t_val,
+                },
+            )
+            if c_resp is None:
+                time.sleep(2.0)
+                continue
 
-        if c_resp.status_code == 400:
-            print(f"[{symbol}] Candles body: {c_resp.text[:250]}")
+            if c_resp.status_code == 429:
+                print(f"[{symbol}] Rate limited ({tag}) -> waiting 8s...")
+                time.sleep(8.0)
+                continue
+
+            if c_resp.status_code == 400:
+                print(f"[{symbol}] 400 ({tag}): {c_resp.text[:160]}")
+                break
+
+            if c_resp.status_code == 200:
+                print(f"[{symbol}] Candles HTTP 200 using {tag}")
+                try:
+                    df = parse_candles(c_resp.json(), min_p, max_p)
+                except Exception as e:
+                    print(f"[{symbol}] Candle parse error: {e}")
+                    df = None
+                break
+
+        if df is not None:
             break
-
-        if c_resp.status_code == 200:
-            try:
-                df = parse_candles(c_resp.json(), min_p, max_p)
-            except Exception as e:
-                print(f"[{symbol}] Candle parse error: {e}")
-                df = None
-            break
-
-        time.sleep(3.0)
+        time.sleep(2.0)
 
     if df is None:
         print(f"[{symbol}] Real 5m candles not available -> skipped.")
