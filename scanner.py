@@ -31,30 +31,35 @@ INSTRUMENT_MAP = {
         "instrument_id": os.environ.get("NIFTY_INST_ID"),
         "exchange": "NSE",
         "sl_cap": 65.0,
+        "exact_names": ["NIFTY 50", "NIFTY50", "NIFTY"],
         "keywords": ["NIFTY 50", "NIFTY50", "NIFTY"],
     },
     "BANKNIFTY": {
         "instrument_id": os.environ.get("BANKNIFTY_INST_ID"),
         "exchange": "NSE",
         "sl_cap": 150.0,
+        "exact_names": ["BANKNIFTY", "NIFTY BANK", "NIFTYBANK"],
         "keywords": ["BANKNIFTY", "NIFTY BANK"],
     },
     "FINNIFTY": {
         "instrument_id": os.environ.get("FINNIFTY_INST_ID"),
         "exchange": "NSE",
         "sl_cap": 70.0,
+        "exact_names": ["FINNIFTY", "NIFTY FIN SERVICE"],
         "keywords": ["FINNIFTY", "NIFTY FIN SERVICE"],
     },
     "MIDCAP NIFTY": {
         "instrument_id": os.environ.get("MIDCAP_INST_ID"),
         "exchange": "NSE",
         "sl_cap": 45.0,
+        "exact_names": ["MIDCPNIFTY", "MIDCAP NIFTY", "NIFTY MID SELECT"],
         "keywords": ["MIDCPNIFTY", "MIDCAP NIFTY", "NIFTY MID SELECT"],
     },
     "SENSEX": {
         "instrument_id": os.environ.get("SENSEX_INST_ID"),
         "exchange": "BSE",
         "sl_cap": 200.0,
+        "exact_names": ["SENSEX"],
         "keywords": ["SENSEX"],
     },
 }
@@ -169,6 +174,30 @@ def sahi_headers() -> dict:
     return headers
 
 
+def pick_best_instrument_row(sub_df: pd.DataFrame, sym_col: str, exact_names: list[str], keywords: list[str]):
+    upper_series = sub_df[sym_col].fillna("").astype(str).str.strip().str.upper()
+
+    # 1. Exact match first
+    for ex_name in exact_names:
+        exact_matches = sub_df[upper_series == ex_name.upper()]
+        if len(exact_matches) > 0:
+            return exact_matches.iloc[0]
+
+    # 2. Prefer spot/index rows if instrument_type / segment column exists
+    cand_df = sub_df[upper_series.apply(lambda s: any(k.upper() in s for k in keywords))]
+    if len(cand_df) == 0:
+        return None
+
+    for col in ["instrument_type", "segment", "type", "series"]:
+        if col in cand_df.columns:
+            t_series = cand_df[col].fillna("").astype(str).str.upper()
+            idx_matches = cand_df[t_series.str.contains("INDEX|SPOT|EQ", regex=True)]
+            if len(idx_matches) > 0:
+                return idx_matches.iloc[0]
+
+    return cand_df.iloc[0]
+
+
 def auto_resolve_instrument_ids():
     missing = [k for k, v in INSTRUMENT_MAP.items() if not v.get("instrument_id")]
     if not missing:
@@ -192,7 +221,9 @@ def auto_resolve_instrument_ids():
 
             for sym in missing:
                 exch = str(INSTRUMENT_MAP[sym]["exchange"] or "").upper()
-                kws = [str(k).upper() for k in INSTRUMENT_MAP[sym]["keywords"]]
+                exact_names = INSTRUMENT_MAP[sym].get("exact_names") or []
+                kws = INSTRUMENT_MAP[sym].get("keywords") or []
+
                 sub_df = df_sm
                 if "exchange" in df_sm.columns:
                     ex_series = df_sm["exchange"].fillna("").astype(str).str.upper()
@@ -200,15 +231,12 @@ def auto_resolve_instrument_ids():
                     if len(ex_matches) > 0:
                         sub_df = ex_matches
 
-                sym_series = sub_df[sym_col].fillna("").astype(str).str.upper()
-                mask = sym_series.apply(lambda s: any(k in s for k in kws))
-                matches = sub_df[mask]
-                if len(matches) > 0:
-                    raw_id = matches.iloc[0][id_col]
-                    if pd.notna(raw_id):
-                        found_id = str(raw_id).strip()
-                        INSTRUMENT_MAP[sym]["instrument_id"] = found_id
-                        print(f"[{sym}] Resolved instrument_id ({id_col}) -> {found_id}")
+                row = pick_best_instrument_row(sub_df, sym_col, exact_names, kws)
+                if row is not None and pd.notna(row[id_col]):
+                    found_id = str(row[id_col]).strip()
+                    found_sym = str(row[sym_col]).strip()
+                    INSTRUMENT_MAP[sym]["instrument_id"] = found_id
+                    print(f"[{sym}] Resolved instrument_id ({id_col}) -> {found_id} ({found_sym})")
             return
         except Exception as e:
             print(f"Scripmaster lookup ({url}) skipped: {e}")
@@ -320,19 +348,24 @@ def build_fallback_df_and_oi(symbol: str):
             "Open":   [25710.0, 25735.0, 25755.0, 25742.0, 25765.0, 25782.0],
             "High":   [25742.0, 25785.0, 25772.0, 25760.0, 25792.0, 25804.0],
             "Low":    [25695.0, 25728.0, 25738.0, 25725.0, 25752.0, 25775.0],
-            "Close":  [25735.0, 25768.0, 25748.0, 25755.0, 25784.0, 25799.60],
+            "Close":  [25735.0, 25768.0, 25748.0, 25755.0, 25784.0, 25800.60],
             "Volume": [115000, 190000, 125000, 110000, 205000, 245000],
         })
         oi_summary = {"pcr": 1.18, "call_oi": 142.5, "put_oi": 168.2, "source": "Fallback"}
         return df, oi_summary
 
-    base = 51500.0 if "BANK" in symbol else (23400.0 if "FIN" in symbol else (12500.0 if "MID" in symbol else 82500.0))
+    base = (
+        64635.20 if "BANK" in symbol else
+        (28871.20 if "FIN" in symbol else
+        (14305.15 if "MID" in symbol else
+        (83919.71 if "SENSEX" in symbol else 25800.60)))
+    )
     step = base * 0.0015
     df = pd.DataFrame({
-        "Open":   [base, base + step, base + 2 * step, base + 1.2 * step, base + 1.8 * step, base + 2.6 * step],
-        "High":   [base + 1.5 * step, base + 3.2 * step, base + 2.4 * step, base + 1.7 * step, base + 2.9 * step, base + 3.8 * step],
-        "Low":    [base - 0.8 * step, base + 0.9 * step, base + 1.1 * step, base + 0.5 * step, base + 1.1 * step, base + 2.1 * step],
-        "Close":  [base + step, base + 2.2 * step, base + 1.4 * step, base + 1.1 * step, base + 2.5 * step, base + 3.5 * step],
+        "Open":   [base - 2.5 * step, base - 1.5 * step, base - 0.5 * step, base - 1.2 * step, base - 0.4 * step, base + 0.3 * step],
+        "High":   [base - 1.0 * step, base + 0.7 * step, base + 0.2 * step, base - 0.7 * step, base + 0.4 * step, base + 1.1 * step],
+        "Low":    [base - 3.3 * step, base - 1.6 * step, base - 1.4 * step, base - 2.0 * step, base - 1.4 * step, base - 0.4 * step],
+        "Close":  [base - 1.5 * step, base - 0.5 * step, base - 1.2 * step, base - 1.5 * step, base - 0.3 * step, base],
         "Volume": [90000, 150000, 100000, 95000, 160000, 210000],
     })
     oi_summary = {"pcr": 1.06, "call_oi": 95.0, "put_oi": 100.7, "source": "Fallback"}
@@ -347,7 +380,7 @@ def fetch_sahi_candles_and_oi(symbol: str, cfg: dict):
     if token and inst_id:
         try:
             c_url = f"{SAHI_API_BASE_URL}/v1/marketdata/candles"
-            c_params = {"i": int(inst_id), "instrument_id": int(inst_id), "interval": "5m"}
+            c_params = {"i": int(inst_id), "instrument_id": int(inst_id), "size": "5m", "interval": "5m"}
             c_resp = requests.get(c_url, headers=sahi_headers(), params=c_params, timeout=15)
             print(f"[{symbol}] Sahi Candles HTTP {c_resp.status_code}: {c_resp.text[:160]}")
             df = parse_candles_payload(c_resp.json()) if c_resp.status_code == 200 else None
@@ -360,7 +393,7 @@ def fetch_sahi_candles_and_oi(symbol: str, cfg: dict):
                     df = parse_ltp_into_df(ltp_resp.json(), str(inst_id), fb_df)
 
             oc_url = f"{SAHI_API_BASE_URL}/v1/marketdata/optionchain"
-            oc_params = {"i": int(inst_id), "instrument_id": int(inst_id)}
+            oc_params = {"underlying_id": int(inst_id), "i": int(inst_id), "instrument_id": int(inst_id)}
             oc_resp = requests.get(oc_url, headers=sahi_headers(), params=oc_params, timeout=15)
             print(f"[{symbol}] Sahi OC HTTP {oc_resp.status_code}: {oc_resp.text[:160]}")
             oi_summary = parse_oi_payload(oc_resp.json()) if oc_resp.status_code == 200 else None
