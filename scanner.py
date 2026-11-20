@@ -310,14 +310,11 @@ def fetch_market_data(symbol: str, cfg: dict, inst_id: str, headers: dict):
     from_ist = (now_ist - timedelta(days=5)).replace(hour=9, minute=15, second=0, microsecond=0)
     to_ist = now_ist.replace(microsecond=0)
 
-    from_utc = from_ist.astimezone(timezone.utc)
-    to_utc = to_ist.astimezone(timezone.utc)
-
     fmt_candidates = [
-        ("iso_ist", from_ist.strftime("%Y-%m-%dT%H:%M:%S+05:30"), to_ist.strftime("%Y-%m-%dT%H:%M:%S+05:30")),
-        ("iso_z", from_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), to_utc.strftime("%Y-%m-%dT%H:%M:%SZ")),
         ("epoch_s", str(int(from_ist.timestamp())), str(int(to_ist.timestamp()))),
         ("epoch_ms", str(int(from_ist.timestamp() * 1000)), str(int(to_ist.timestamp() * 1000))),
+        ("iso_ist", from_ist.strftime("%Y-%m-%dT%H:%M:%S+05:30"), to_ist.strftime("%Y-%m-%dT%H:%M:%S+05:30")),
+        ("dt_space", from_ist.strftime("%Y-%m-%d %H:%M:%S"), to_ist.strftime("%Y-%m-%d %H:%M:%S")),
     ]
 
     id_val = int(inst_id) if inst_id.isdigit() else inst_id
@@ -330,6 +327,7 @@ def fetch_market_data(symbol: str, cfg: dict, inst_id: str, headers: dict):
                 headers=headers,
                 params={
                     "i": id_val,
+                    "instrument_id": id_val,
                     "size": "5m",
                     "from": f_val,
                     "to": t_val,
@@ -345,7 +343,7 @@ def fetch_market_data(symbol: str, cfg: dict, inst_id: str, headers: dict):
                 continue
 
             if c_resp.status_code == 400:
-                print(f"[{symbol}] 400 ({tag}): {c_resp.text[:160]}")
+                print(f"[{symbol}] 400 ({tag}): {c_resp.text[:140]}")
                 break
 
             if c_resp.status_code == 200:
