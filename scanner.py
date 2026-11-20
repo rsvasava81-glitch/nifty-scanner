@@ -1,4 +1,5 @@
 import os
+import io
 import csv
 import time
 from datetime import datetime, timezone, timedelta
@@ -13,18 +14,47 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
 SAHI_BASE_URL = (os.environ.get("SAHI_BASE_URL") or "https://api.sahi.com").rstrip("/")
-SAHI_ACCESS_TOKEN = (
-    os.environ.get("SAHI_ACCESS_TOKEN")
+SAHI_KEY_ID = (
+    os.environ.get("SAHI_KEY_ID")
     or os.environ.get("SAHI_API_KEY")
-    or os.environ.get("SAHI_KEY_ID")
+    or os.environ.get("SAHI_ACCESS_TOKEN")
 )
+SAHI_SECRET = os.environ.get("SAHI_SECRET")
+EXPLICIT_ACCESS_TOKEN = os.environ.get("SAHI_ACCESS_TOKEN")
+
+ACTIVE_BEARER_TOKEN = None
 
 INSTRUMENT_MAP = {
-    "NIFTY 50": {"instrument_id": os.environ.get("NIFTY_INST_ID"), "exchange": "NSE", "sl_cap": 65.0},
-    "BANKNIFTY": {"instrument_id": os.environ.get("BANKNIFTY_INST_ID"), "exchange": "NSE", "sl_cap": 150.0},
-    "FINNIFTY": {"instrument_id": os.environ.get("FINNIFTY_INST_ID"), "exchange": "NSE", "sl_cap": 70.0},
-    "MIDCAP NIFTY": {"instrument_id": os.environ.get("MIDCAP_INST_ID"), "exchange": "NSE", "sl_cap": 45.0},
-    "SENSEX": {"instrument_id": os.environ.get("SENSEX_INST_ID"), "exchange": "BSE", "sl_cap": 200.0},
+    "NIFTY 50": {
+        "instrument_id": os.environ.get("NIFTY_INST_ID"),
+        "exchange": "NSE",
+        "sl_cap": 65.0,
+        "keywords": ["NIFTY 50", "NIFTY50", "NIFTY"],
+    },
+    "BANKNIFTY": {
+        "instrument_id": os.environ.get("BANKNIFTY_INST_ID"),
+        "exchange": "NSE",
+        "sl_cap": 150.0,
+        "keywords": ["BANKNIFTY", "NIFTY BANK"],
+    },
+    "FINNIFTY": {
+        "instrument_id": os.environ.get("FINNIFTY_INST_ID"),
+        "exchange": "NSE",
+        "sl_cap": 70.0,
+        "keywords": ["FINNIFTY", "NIFTY FIN SERVICE"],
+    },
+    "MIDCAP NIFTY": {
+        "instrument_id": os.environ.get("MIDCAP_INST_ID"),
+        "exchange": "NSE",
+        "sl_cap": 45.0,
+        "keywords": ["MIDCPNIFTY", "MIDCAP NIFTY", "NIFTY MID SELECT"],
+    },
+    "SENSEX": {
+        "instrument_id": os.environ.get("SENSEX_INST_ID"),
+        "exchange": "BSE",
+        "sl_cap": 200.0,
+        "keywords": ["SENSEX"],
+    },
 }
 
 
@@ -76,12 +106,108 @@ def append_trade_log(row: dict):
         writer.writerow(row)
 
 
+def extract_token(obj) -> str | None:
+    if isinstance(obj, str) and obj.strip():
+        return obj.strip()
+    if isinstance(obj, dict):
+        for k in ["access_token", "token", "bearer_token", "jwt", "accessToken"]:
+            if k in obj and obj[k]:
+                return str(obj[k]).strip()
+        for nested in ["data", "result", "payload"]:
+            if nested in obj:
+                found = extract_token(obj[nested])
+                if found:
+                    return found
+    return None
+
+
+def mint_sahi_token() -> str | None:
+    global ACTIVE_BEARER_TOKEN
+    if ACTIVE_BEARER_TOKEN:
+        return ACTIVE_BEARER_TOKEN
+
+    token_urls = [
+        f"{SAHI_BASE_URL}/api/v1/apikeys/token",
+        f"{SAHI_BASE_URL}/v1/apikeys/token",
+    ]
+    payloads = []
+    if SAHI_KEY_ID and SAHI_SECRET:
+        payloads.append({"key_id": SAHI_KEY_ID, "secret": SAHI_SECRET})
+        payloads.append({"api_key": SAHI_KEY_ID, "api_secret": SAHI_SECRET})
+        payloads.append({"keyId": SAHI_KEY_ID, "secretKey": SAHI_SECRET})
+    elif SAHI_KEY_ID:
+        payloads.append({"key_id": SAHI_KEY_ID})
+        payloads.append({"api_key": SAHI_KEY_ID})
+
+    for url in token_urls:
+        for body in payloads:
+            try:
+                resp = requests.post(url, json=body, headers={"Accept": "application/json", "Content-Type": "application/json"}, timeout=15)
+                print(f"Token Mint [{url}] keys={list(body.keys())} -> HTTP {resp.status_code}: {resp.text[:140]}")
+                if resp.status_code in (200, 201):
+                    tok = extract_token(resp.json())
+                    if tok:
+                        ACTIVE_BEARER_TOKEN = tok
+                        print("Successfully minted Sahi Bearer token.")
+                        return ACTIVE_BEARER_TOKEN
+            except Exception as e:
+                print(f"Token Mint Exception ({url}): {e}")
+
+    if EXPLICIT_ACCESS_TOKEN:
+        ACTIVE_BEARER_TOKEN = EXPLICIT_ACCESS_TOKEN.strip()
+        return ACTIVE_BEARER_TOKEN
+    return None
+
+
 def sahi_headers() -> dict:
-    return {
-        "Authorization": f"Bearer {SAHI_ACCESS_TOKEN}",
-        "x-api-key": str(SAHI_ACCESS_TOKEN or ""),
+    headers = {
         "Accept": "application/json",
     }
+    tok = ACTIVE_BEARER_TOKEN or mint_sahi_token()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    return headers
+
+
+def auto_resolve_instrument_ids():
+    missing = [k for k, v in INSTRUMENT_MAP.items() if not v.get("instrument_id")]
+    if not missing:
+        return
+
+    scripmaster_urls = [
+        "https://assets.sahi.com/external/instruments.csv",
+        f"{SAHI_BASE_URL}/v1/marketdata/scripmaster",
+        f"{SAHI_BASE_URL}/v1/scripmaster",
+    ]
+    for url in scripmaster_urls:
+        try:
+            resp = requests.get(url, headers=sahi_headers(), timeout=20)
+            if resp.status_code != 200 or not resp.text:
+                continue
+            df_sm = pd.read_csv(io.StringIO(resp.text))
+            id_col = next((c for c in ["id", "instrument_id", "security_id", "token"] if c in df_sm.columns), None)
+            sym_col = next((c for c in ["symbol", "trading_symbol", "name", "display_name"] if c in df_sm.columns), None)
+            if not id_col or not sym_col:
+                continue
+
+            for sym in missing:
+                exch = INSTRUMENT_MAP[sym]["exchange"]
+                kws = [k.upper() for k in INSTRUMENT_MAP[sym]["keywords"]]
+                sub_df = df_sm
+                if "exchange" in df_sm.columns:
+                    ex_matches = df_sm[df_sm["exchange"].astype(str).str.upper() == exch.upper()]
+                    if len(ex_matches) > 0:
+                        sub_df = ex_matches
+
+                mask = sub_df[sym_col].astype(str).str.upper().apply(lambda s: any(k in s for k in kws))
+                matches = sub_df[mask]
+                if len(matches) > 0:
+                    found_id = str(matches.iloc[0][id_col]).strip()
+                    INSTRUMENT_MAP[sym]["instrument_id"] = found_id
+                    print(f"[{sym}] Resolved instrument_id ({id_col}) -> {found_id}")
+            return
+        except Exception as e:
+            print(f"Scripmaster lookup ({url}) skipped: {e}")
 
 
 def parse_candles_payload(payload_json) -> pd.DataFrame | None:
@@ -152,8 +278,9 @@ def parse_oi_payload(payload_json) -> dict | None:
 
 def fetch_sahi_candles_and_oi(symbol: str, cfg: dict):
     inst_id = cfg.get("instrument_id")
+    token = mint_sahi_token()
 
-    if SAHI_ACCESS_TOKEN and inst_id:
+    if token and inst_id:
         try:
             c_url = f"{SAHI_BASE_URL}/v1/marketdata/candles"
             c_params = {"instrument_id": int(inst_id), "interval": "5m"}
@@ -172,7 +299,7 @@ def fetch_sahi_candles_and_oi(symbol: str, cfg: dict):
         except Exception as e:
             print(f"[{symbol}] Sahi API Exception: {e}")
     else:
-        print(f"[{symbol}] Missing SAHI_ACCESS_TOKEN or instrument_id -> using Fallback.")
+        print(f"[{symbol}] Missing token or instrument_id (token={bool(token)}, inst_id={inst_id}) -> using Fallback.")
 
     if symbol == "NIFTY 50":
         df = pd.DataFrame({
@@ -326,6 +453,7 @@ def generate_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict):
 
 
 def main():
+    auto_resolve_instrument_ids()
     sent = 0
     for sym, cfg in INSTRUMENT_MAP.items():
         df, oi = fetch_sahi_candles_and_oi(sym, cfg)
