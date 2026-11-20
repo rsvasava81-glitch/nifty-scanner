@@ -2,35 +2,48 @@ name: Market Breakout Scanner
 
 on:
   schedule:
-    - cron: '*/5 9-15 * * 1-5'
-  workflow_dispatch:
+    - cron: "*/5 3-10 * * 1-5" # Every 5 mins during Indian market hours (UTC 03:45-10:00 ≈ IST 09:15-15:30)
+  workflow_dispatch: {}
 
 permissions:
-  contents: write
+  contents: write # Required so GitHub Actions can push updates to trade_log.csv
 
 jobs:
-  run_scanner:
+  run-scanner:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run python scanner.py
+      - name: Run scanner.py
         env:
-          SAHI_KEY_ID: ${{ secrets.SAHI_KEY_ID }}
-          SAHI_SECRET: ${{ secrets.SAHI_SECRET }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          SAHI_BASE_URL: ${{ secrets.SAHI_BASE_URL }}
+          SAHI_ACCESS_TOKEN: ${{ secrets.SAHI_ACCESS_TOKEN }}
+          SAHI_API_KEY: ${{ secrets.SAHI_API_KEY }}
+          SAHI_KEY_ID: ${{ secrets.SAHI_KEY_ID }}
+          NIFTY_INST_ID: ${{ secrets.NIFTY_INST_ID }}
+          BANKNIFTY_INST_ID: ${{ secrets.BANKNIFTY_INST_ID }}
+          FINNIFTY_INST_ID: ${{ secrets.FINNIFTY_INST_ID }}
+          MIDCAP_INST_ID: ${{ secrets.MIDCAP_INST_ID }}
+          SENSEX_INST_ID: ${{ secrets.SENSEX_INST_ID }}
+        run: python scanner.py
+
+      - name: Commit updated trade_log.csv
         run: |
-          python scanner.py
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add trade_log.csv
+          git diff --staged --quiet || git commit -m "Update trade_log.csv [skip ci]"
+          git push
