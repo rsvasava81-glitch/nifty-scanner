@@ -224,7 +224,7 @@ def parse_candles(payload, min_p: float, max_p: float) -> pd.DataFrame | None:
     rows = payload.get("candles") or payload.get("data") or payload.get("ohlc") or []
     if isinstance(rows, dict):
         rows = rows.get("candles") or rows.get("data") or []
-    if not isinstance(rows, list) or len(rows) < 6:
+    if not isinstance(rows, list) or len(rows) < 12:
         return None
 
     if isinstance(rows[0], dict):
@@ -240,10 +240,37 @@ def parse_candles(payload, min_p: float, max_p: float) -> pd.DataFrame | None:
             "c": "Close",
             "volume": "Volume",
             "v": "Volume",
+            "vol": "Volume",
         }
         df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
     elif isinstance(rows[0], (list, tuple)) and len(rows[0]) >= 5:
-        df = pd.DataFrame(rows, columns=["Time", "Open", "High", "Low", "Close", "Volume"][: len(rows[0])])
+        raw_df = pd.DataFrame(rows)
+        if raw_df.shape[1] >= 6:
+            first_med = pd.to_numeric(raw_df.iloc[:, 0], errors="coerce").median()
+            if pd.notna(first_med) and first_med > 1_000_000_000:
+                df = pd.DataFrame({
+                    "Open": raw_df.iloc[:, 1],
+                    "High": raw_df.iloc[:, 2],
+                    "Low": raw_df.iloc[:, 3],
+                    "Close": raw_df.iloc[:, 4],
+                    "Volume": raw_df.iloc[:, 5],
+                })
+            else:
+                df = pd.DataFrame({
+                    "Open": raw_df.iloc[:, 0],
+                    "High": raw_df.iloc[:, 1],
+                    "Low": raw_df.iloc[:, 2],
+                    "Close": raw_df.iloc[:, 3],
+                    "Volume": raw_df.iloc[:, 4],
+                })
+        else:
+            df = pd.DataFrame({
+                "Open": raw_df.iloc[:, 0],
+                "High": raw_df.iloc[:, 1],
+                "Low": raw_df.iloc[:, 2],
+                "Close": raw_df.iloc[:, 3],
+                "Volume": raw_df.iloc[:, 4],
+            })
     else:
         return None
 
@@ -260,8 +287,11 @@ def parse_candles(payload, min_p: float, max_p: float) -> pd.DataFrame | None:
         df["Volume"] = 100000.0
     df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(100000.0)
 
-    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna().tail(30).reset_index(drop=True)
-    if len(df) < 6:
+    df["High"] = np.maximum(df["High"], np.maximum(df["Open"], df["Close"]))
+    df["Low"] = np.minimum(df["Low"], np.minimum(df["Open"], df["Close"]))
+
+    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna().tail(60).reset_index(drop=True)
+    if len(df) < 12:
         return None
 
     last_close = normalize_price(float(df["Close"].iloc[-1]), min_p, max_p)
@@ -271,7 +301,7 @@ def parse_candles(payload, min_p: float, max_p: float) -> pd.DataFrame | None:
 
 
 def parse_option_chain(payload) -> dict:
-    default_oi = {"pcr": 1.0, "call_oi": 0.0, "put_oi": 0.0, "source": "Standard"}
+    default_oi = {"pcr": None, "call_oi": 0.0, "put_oi": 0.0, "source": "Standard"}
     if not isinstance(payload, dict):
         return default_oi
     raw = payload.get("data") or payload.get("chain") or payload.get("option_chain") or []
@@ -321,7 +351,7 @@ def fetch_market_data(symbol: str, cfg: dict, inst_id: str, headers: dict):
     df = None
 
     for tag, f_val, t_val in fmt_candidates:
-        for attempt in range(2):
+        for _ in range(2):
             c_resp = safe_get(
                 f"{SAHI_API_BASE_URL}/v1/marketdata/candles",
                 headers=headers,
@@ -370,7 +400,7 @@ def fetch_market_data(symbol: str, cfg: dict, inst_id: str, headers: dict):
         headers=headers,
         params={"underlying_id": id_val},
     )
-    oi = {"pcr": 1.0, "call_oi": 0.0, "put_oi": 0.0, "source": "Standard"}
+    oi = {"pcr": None, "call_oi": 0.0, "put_oi": 0.0, "source": "Standard"}
     if oc_resp is not None and oc_resp.status_code == 200:
         try:
             oi = parse_option_chain(oc_resp.json())
@@ -380,6 +410,160 @@ def fetch_market_data(symbol: str, cfg: dict, inst_id: str, headers: dict):
     return df, oi
 
 
+def analyze_hh_hl_lh_ll(highs: np.ndarray, lows: np.ndarray):
+    """Identify HH/HL (UPTREND) or LH/LL (DOWNTREND) from recent pivot swings."""
+    lookback = min(len(highs), 45)
+    h_sub = highs[-lookback:]
+    l_sub = lows[-lookback:]
+
+    swing_highs = []
+    swing_lows = []
+
+    for i in range(1, len(h_sub) - 1):
+        if h_sub[i] >= h_sub[i - 1] and h_sub[i] >= h_sub[i + 1]:
+            if not swing_highs or abs(float(h_sub[i]) - swing_highs[-1][1]) > 0.01:
+                swing_highs.append((i, float(h_sub[i])))
+        if l_sub[i] <= l_sub[i - 1] and l_sub[i] <= l_sub[i + 1]:
+            if not swing_lows or abs(float(l_sub[i]) - swing_lows[-1][1]) > 0.01:
+                swing_lows.append((i, float(l_sub[i])))
+
+    if len(swing_highs) >= 2:
+        h1_idx, h1 = swing_highs[-2]
+        h2_idx, h2 = swing_highs[-1]
+    else:
+        mid = max(1, len(h_sub) // 2)
+        h1_idx, h1 = int(np.argmax(h_sub[:mid])), float(np.max(h_sub[:mid]))
+        h2_idx, h2 = mid + int(np.argmax(h_sub[mid:])), float(np.max(h_sub[mid:]))
+
+    if len(swing_lows) >= 2:
+        l1_idx, l1 = swing_lows[-2]
+        l2_idx, l2 = swing_lows[-1]
+    else:
+        mid = max(1, len(l_sub) // 2)
+        l1_idx, l1 = int(np.argmin(l_sub[:mid])), float(np.min(l_sub[:mid]))
+        l2_idx, l2 = mid + int(np.argmin(l_sub[mid:])), float(np.min(l_sub[mid:]))
+
+    is_hh = h2 > h1
+    is_hl = l2 > l1
+    is_lh = h2 < h1
+    is_ll = l2 < l1
+
+    if is_hh and is_hl:
+        trend = "UPTREND (HH+HL)"
+        structure_note = f"HH ({h1:.2f}->{h2:.2f}) & HL ({l1:.2f}->{l2:.2f})"
+    elif is_lh and is_ll:
+        trend = "DOWNTREND (LH+LL)"
+        structure_note = f"LH ({h1:.2f}->{h2:.2f}) & LL ({l1:.2f}->{l2:.2f})"
+    elif is_hh or is_hl:
+        trend = "UPTREND (HH+HL)" if (h2_idx >= l2_idx and h2 >= l1) else "SIDEWAYS / MIXED"
+        structure_note = f"H: {h1:.2f}->{h2:.2f}, L: {l1:.2f}->{l2:.2f}"
+    elif is_lh or is_ll:
+        trend = "DOWNTREND (LH+LL)" if (l2_idx >= h2_idx and l2 <= h1) else "SIDEWAYS / MIXED"
+        structure_note = f"H: {h1:.2f}->{h2:.2f}, L: {l1:.2f}->{l2:.2f}"
+    else:
+        trend = "SIDEWAYS / MIXED"
+        structure_note = f"H: {h1:.2f}->{h2:.2f}, L: {l1:.2f}->{l2:.2f}"
+
+    return trend, structure_note, l1, l2, h1, h2
+
+
+def evaluate_target_reaction(direction: str, targets: list[tuple[str, float]], prev_c: dict, curr_c: dict):
+    """Check target close vs touch and next-candle response for BOOK vs CONTINUE alert."""
+    if direction == "CE":
+        active_idx = 0
+        closed_target = None
+        touched_target = None
+
+        for idx, (lbl, t_val) in enumerate(targets):
+            if prev_c["Close"] > t_val or curr_c["Close"] > t_val:
+                closed_target = (lbl, t_val)
+                active_idx = min(idx + 1, len(targets) - 1)
+            elif prev_c["High"] >= t_val or curr_c["High"] >= t_val:
+                touched_target = (lbl, t_val)
+                active_idx = idx
+
+        next_lbl, next_val = targets[active_idx]
+
+        if closed_target is not None:
+            c_lbl, c_val = closed_target
+            if curr_c["Close"] >= c_val:
+                reaction_note = f"Candle closed above {c_lbl} ({c_val:.2f}) & holding -> Shift to {next_lbl} ({next_val:.2f})"
+                trade_action = f"CONTINUE TO {next_lbl} ({next_val:.2f})"
+            else:
+                reaction_note = f"Closed above {c_lbl} ({c_val:.2f}) then pulled back -> Watch {c_val:.2f} support"
+                trade_action = f"PARTIAL BOOK / WATCH {c_val:.2f}"
+            return reaction_note, trade_action, f"Closed {c_lbl} -> {next_lbl}"
+
+        if touched_target is not None:
+            t_lbl, t_val = touched_target
+            tol = max(t_val * 0.0008, 1.0)
+            holding_around = abs(curr_c["Close"] - t_val) <= tol or (curr_c["Low"] <= t_val <= curr_c["High"])
+            if curr_c["Close"] < curr_c["Open"] and curr_c["High"] >= t_val:
+                reaction_note = f"Touched {t_lbl} ({t_val:.2f}) & rejected red -> Book profit / don't chase"
+                trade_action = f"BOOK TARGET ({t_lbl} REJECTION)"
+            elif holding_around:
+                reaction_note = f"Touched {t_lbl} ({t_val:.2f}) & holding around level -> Check next candle break"
+                trade_action = f"BOOK TARGET OR WAIT 1 CANDLE AT {t_lbl}"
+            else:
+                reaction_note = f"Touched {t_lbl} ({t_val:.2f}) & pushing up -> Wait close above {t_val:.2f}"
+                trade_action = f"HOLD / WATCH CLOSE ABOVE {t_lbl}"
+            return reaction_note, trade_action, f"Touched {t_lbl} (No Close)"
+
+        return (
+            f"Below {targets[0][0]} ({targets[0][1]:.2f}) -> No target touch yet",
+            f"HOLD FOR {targets[0][0]} ({targets[0][1]:.2f})",
+            "In Progress",
+        )
+
+    elif direction == "PE":
+        active_idx = 0
+        closed_target = None
+        touched_target = None
+
+        for idx, (lbl, t_val) in enumerate(targets):
+            if prev_c["Close"] < t_val or curr_c["Close"] < t_val:
+                closed_target = (lbl, t_val)
+                active_idx = min(idx + 1, len(targets) - 1)
+            elif prev_c["Low"] <= t_val or curr_c["Low"] <= t_val:
+                touched_target = (lbl, t_val)
+                active_idx = idx
+
+        next_lbl, next_val = targets[active_idx]
+
+        if closed_target is not None:
+            c_lbl, c_val = closed_target
+            if curr_c["Close"] <= c_val:
+                reaction_note = f"Candle closed below {c_lbl} ({c_val:.2f}) & holding -> Shift to {next_lbl} ({next_val:.2f})"
+                trade_action = f"CONTINUE TO {next_lbl} ({next_val:.2f})"
+            else:
+                reaction_note = f"Closed below {c_lbl} ({c_val:.2f}) then bounced -> Watch {c_val:.2f} resistance"
+                trade_action = f"PARTIAL BOOK / WATCH {c_val:.2f}"
+            return reaction_note, trade_action, f"Closed {c_lbl} -> {next_lbl}"
+
+        if touched_target is not None:
+            t_lbl, t_val = touched_target
+            tol = max(t_val * 0.0008, 1.0)
+            holding_around = abs(curr_c["Close"] - t_val) <= tol or (curr_c["Low"] <= t_val <= curr_c["High"])
+            if curr_c["Close"] > curr_c["Open"] and curr_c["Low"] <= t_val:
+                reaction_note = f"Touched {t_lbl} ({t_val:.2f}) & bounced green -> Book profit / don't chase"
+                trade_action = f"BOOK TARGET ({t_lbl} BOUNCE)"
+            elif holding_around:
+                reaction_note = f"Touched {t_lbl} ({t_val:.2f}) & holding around level -> Check next candle break"
+                trade_action = f"BOOK TARGET OR WAIT 1 CANDLE AT {t_lbl}"
+            else:
+                reaction_note = f"Touched {t_lbl} ({t_val:.2f}) & pushing down -> Wait close below {t_val:.2f}"
+                trade_action = f"HOLD / WATCH CLOSE BELOW {t_lbl}"
+            return reaction_note, trade_action, f"Touched {t_lbl} (No Close)"
+
+        return (
+            f"Above {targets[0][0]} ({targets[0][1]:.2f}) -> No target touch yet",
+            f"HOLD FOR {targets[0][0]} ({targets[0][1]:.2f})",
+            "In Progress",
+        )
+
+    return "Sideways / No active trade direction", "NO TRADE / WAIT", "Idle"
+
+
 def build_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict):
     highs = df["High"].astype(float).values
     lows = df["Low"].astype(float).values
@@ -387,55 +571,134 @@ def build_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict):
     opens = df["Open"].astype(float).values
     vols = df["Volume"].astype(float).values
 
-    n = len(df)
-    p1_idx = int(np.argmin(lows[: max(1, n // 2)]))
-    p1_low = float(lows[p1_idx])
-
-    p2_idx = p1_idx + int(np.argmax(highs[p1_idx:]))
-    p2_high = float(highs[p2_idx])
-
-    p3_slice = lows[p2_idx:]
-    p3_base = float(np.min(p3_slice)) if len(p3_slice) > 0 else float(np.min(lows[-2:]))
+    trend, structure_note, l1, l2, h1, h2 = analyze_hh_hl_lh_ll(highs, lows)
 
     entry = float(closes[-1])
-    swing = max(p2_high - p1_low, round(entry * 0.002, 2), 1.0)
-    sl_dist = min(float(cfg["sl_points"]), max(swing * 0.25, round(entry * 0.0015, 2), 10.0))
+    last_open = float(opens[-1])
+    last_high = float(highs[-1])
+    last_low = float(lows[-1])
+
+    curr_c = {"Open": float(opens[-1]), "High": float(highs[-1]), "Low": float(lows[-1]), "Close": float(closes[-1])}
+    prev_c = {"Open": float(opens[-2]), "High": float(highs[-2]), "Low": float(lows[-2]), "Close": float(closes[-2])}
 
     avg_vol = float(np.mean(vols[:-1])) if len(vols) > 1 else float(vols[-1])
     vol_mult = round(float(vols[-1] / max(avg_vol, 1.0)), 2)
-    candle_rng = max(float(highs[-1] - lows[-1]), 1e-5)
-    body_pct = int(round(min(100.0, (abs(float(closes[-1] - opens[-1])) / candle_rng) * 100.0)))
+    candle_rng = max(last_high - last_low, 1e-5)
+    body_pct = int(round(min(100.0, (abs(entry - last_open) / candle_rng) * 100.0)))
 
-    pcr = float(oi.get("pcr", 1.0))
-    bullish = (closes[-1] >= opens[-1]) and (pcr >= 0.90)
+    raw_pcr = oi.get("pcr")
+    has_live_pcr = isinstance(raw_pcr, (int, float)) and raw_pcr > 0
+    pcr = float(raw_pcr) if has_live_pcr else 1.00
+    pcr_label = f"PCR {pcr:.2f}" if has_live_pcr else "OI N/A (No Live OC)"
 
-    if bullish:
-        side = "CALL (CE) SIDE ENTRY"
-        sl = round(entry - sl_dist, 2)
-        t1 = round(entry + swing * 0.50, 2)
-        t2 = round(entry + swing * 1.00, 2)
-        t3 = round(entry + swing * 1.618, 2)
-        bias = "BULLISH" if pcr >= 1.05 else "NEUTRAL-BULL"
+    max_sl = float(cfg["sl_points"])
+
+    if "UPTREND" in trend:
+        # 3-Point Trend Fib: P1 = Swing Low (l2), P2 = Swing High (h2), P3 = same as P1 (l2)
+        p1 = round(l2, 2)
+        p2 = round(max(h2, float(np.max(highs[max(0, len(highs) - 15):]))), 2)
+        p3 = p1  # Point 3 anchored at Point 1 position
+
+        leg_rng = max(p2 - p1, round(entry * 0.002, 2), 1.0)
+        fib_050 = round(p2 - 0.50 * leg_rng, 2)
+        fib_0618 = round(p2 - 0.618 * leg_rng, 2)
+        zone_top = max(fib_050, fib_0618, p1)
+        zone_bot = min(fib_050, fib_0618, p1)
+
+        t_1414 = round(p3 + 1.414 * leg_rng, 2)
+        t_1618 = round(p3 + 1.618 * leg_rng, 2)
+        t_2000 = round(p3 + 2.000 * leg_rng, 2)
+        t_2618 = round(p3 + 2.618 * leg_rng, 2)
+        targets = [("1.414", t_1414), ("1.618", t_1618), ("2.0", t_2000), ("2.618", t_2618)]
+
+        in_retest = (last_low <= zone_top * 1.0015) and (entry >= zone_bot * 0.9975)
+        bullish_candle = entry >= last_open
+
+        raw_sl_dist = min(max_sl, max(entry - (p3 - leg_rng * 0.05), round(entry * 0.0012, 2), 10.0))
+        sl = round(entry - raw_sl_dist, 2)
+
+        if in_retest and bullish_candle:
+            side = "CALL (CE) - P3/FIB RETEST BUY"
+            bias = "HH+HL 3PT FIB (P3=P1)"
+        else:
+            side = "WAIT FOR P3/0.5-0.618 RETEST (CE)"
+            bias = "HH+HL TREND WATCH"
+
+        reaction_note, trade_action, target_status = evaluate_target_reaction("CE", targets, prev_c, curr_c)
+        pts_line = f"P1 (Low): {p1:.2f} | P2 (High): {p2:.2f} | P3 (=P1): {p3:.2f}"
+
+    elif "DOWNTREND" in trend:
+        # 3-Point Trend Fib: P1 = Swing High (h2), P2 = Swing Low (l2), P3 = same as P1 (h2)
+        p1 = round(h2, 2)
+        p2 = round(min(l2, float(np.min(lows[max(0, len(lows) - 15):]))), 2)
+        p3 = p1  # Point 3 anchored at Point 1 position
+
+        leg_rng = max(p1 - p2, round(entry * 0.002, 2), 1.0)
+        fib_050 = round(p2 + 0.50 * leg_rng, 2)
+        fib_0618 = round(p2 + 0.618 * leg_rng, 2)
+        zone_bot = min(fib_050, fib_0618, p1)
+        zone_top = max(fib_050, fib_0618, p1)
+
+        t_1414 = round(p3 - 1.414 * leg_rng, 2)
+        t_1618 = round(p3 - 1.618 * leg_rng, 2)
+        t_2000 = round(p3 - 2.000 * leg_rng, 2)
+        t_2618 = round(p3 - 2.618 * leg_rng, 2)
+        targets = [("1.414", t_1414), ("1.618", t_1618), ("2.0", t_2000), ("2.618", t_2618)]
+
+        in_retest = (last_high >= zone_bot * 0.9985) and (entry <= zone_top * 1.0025)
+        bearish_candle = entry <= last_open
+
+        raw_sl_dist = min(max_sl, max((p3 + leg_rng * 0.05) - entry, round(entry * 0.0012, 2), 10.0))
+        sl = round(entry + raw_sl_dist, 2)
+
+        if in_retest and bearish_candle:
+            side = "PUT (PE) - P3/FIB RETEST SELL"
+            bias = "LH+LL 3PT FIB (P3=P1)"
+        else:
+            side = "WAIT FOR P3/0.5-0.618 RETEST (PE)"
+            bias = "LH+LL TREND WATCH"
+
+        reaction_note, trade_action, target_status = evaluate_target_reaction("PE", targets, prev_c, curr_c)
+        pts_line = f"P1 (High): {p1:.2f} | P2 (Low): {p2:.2f} | P3 (=P1): {p3:.2f}"
+
     else:
-        side = "PUT (PE) SIDE ENTRY"
-        sl = round(entry + sl_dist, 2)
-        t1 = round(entry - swing * 0.50, 2)
-        t2 = round(entry - swing * 1.00, 2)
-        t3 = round(entry - swing * 1.618, 2)
-        bias = "BEARISH" if pcr <= 0.85 else "NEUTRAL-BEAR"
+        p1 = round(l2, 2)
+        p2 = round(h2, 2)
+        p3 = p1
+        leg_rng = max(p2 - p1, round(entry * 0.002, 2), 1.0)
+        fib_050 = round(p1 + 0.50 * leg_rng, 2)
+        fib_0618 = round(p1 + 0.618 * leg_rng, 2)
+        t_1414 = round(p3 + 1.414 * leg_rng, 2)
+        t_1618 = round(p3 + 1.618 * leg_rng, 2)
+        t_2000 = round(p3 + 2.000 * leg_rng, 2)
+        t_2618 = round(p3 + 2.618 * leg_rng, 2)
+        sl = round(entry - min(max_sl, round(entry * 0.0015, 2)), 2)
+        side = "NO CLEAR TREND (WAIT)"
+        bias = "SIDEWAYS RANGE"
+        reaction_note, trade_action, target_status = evaluate_target_reaction("NONE", [], prev_c, curr_c)
+        pts_line = f"P1: {p1:.2f} | P2: {p2:.2f} | P3 (=P1): {p3:.2f}"
 
-    conviction = "HIGH CONVICTION" if (vol_mult >= 1.25 and body_pct >= 45) else "MODERATE"
+    conviction = (
+        "HIGH CONVICTION"
+        if ("RETEST BUY" in side or "RETEST SELL" in side) and vol_mult >= 1.15 and body_pct >= 40
+        else "MODERATE"
+    )
 
     msg = (
-        f"F&O Setup: {symbol} ({cfg['exchange']}) [{conviction}]\n"
+        f"3PT Trend Fib Setup: {symbol} ({cfg['exchange']}) [{conviction}]\n"
         f"------------------------------------------\n"
-        f"Side: {side}\n"
-        f"Entry / Close: {entry:.2f}\n"
-        f"Stop Loss (SL): {sl:.2f}\n"
-        f"Target 1 (0.50): {t1:.2f} | Target 2 (1.0): {t2:.2f} | Target 3 (1.618): {t3:.2f}\n"
-        f"P1 Low: {p1_low:.2f} | P2 High: {p2_high:.2f} | Base: {p3_base:.2f}\n"
+        f"Trend: {trend} | {structure_note}\n"
+        f"{pts_line}\n"
+        f"Action: {side}\n"
+        f"Entry / Close: {entry:.2f} | Stop Loss (SL): {sl:.2f}\n"
+        f"Retest Zone (0.5 - 0.618): {fib_050:.2f} - {fib_0618:.2f}\n"
+        f"Targets: 1.414={t_1414:.2f} | 1.618={t_1618:.2f}\n"
+        f"Ext Targets: 2.0={t_2000:.2f} | 2.618={t_2618:.2f}\n"
+        f"Target Status: {target_status}\n"
+        f"Candle Reaction: {reaction_note}\n"
+        f"Management Alert: {trade_action}\n"
         f"Footprint: Vol x{vol_mult} | Body {body_pct}%\n"
-        f"OI ({oi.get('source', 'Standard')}): PCR {pcr:.2f} | {bias}"
+        f"OI ({oi.get('source', 'Standard')}): {pcr_label} | {bias}"
     )
 
     row = {
@@ -447,11 +710,11 @@ def build_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict):
         "side": side,
         "entry_close": round(entry, 2),
         "stop_loss": sl,
-        "p1_low": round(p1_low, 2),
-        "p2_high": round(p2_high, 2),
-        "base_0": round(p3_base, 2),
-        "achieved": "Entry Zone",
-        "next_target": f"{t1:.2f} (T1)",
+        "p1_low": p1,
+        "p2_high": p2,
+        "base_0": p3,
+        "achieved": target_status,
+        "next_target": trade_action,
         "vol_mult": vol_mult,
         "body_pct": body_pct,
         "pcr": pcr,
