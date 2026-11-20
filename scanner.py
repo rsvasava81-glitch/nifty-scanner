@@ -33,7 +33,7 @@ INSTRUMENT_MAP = {
         "sl_cap": 65.0,
         "min_spot": 15000.0,
         "max_spot": 40000.0,
-        "exact_names": ["NIFTY 50", "NIFTY50", "NIFTY"],
+        "exact_names": ["NIFTY 50", "NIFTY50", "NIFTY INDEX"],
         "keywords": ["NIFTY 50", "NIFTY50", "NIFTY"],
     },
     "BANKNIFTY": {
@@ -51,7 +51,7 @@ INSTRUMENT_MAP = {
         "sl_cap": 70.0,
         "min_spot": 15000.0,
         "max_spot": 45000.0,
-        "exact_names": ["FINNIFTY", "NIFTY FIN SERVICE"],
+        "exact_names": ["FINNIFTY", "NIFTY FIN SERVICE", "NIFTY FINANCIAL SERVICES"],
         "keywords": ["FINNIFTY", "NIFTY FIN SERVICE"],
     },
     "MIDCAP NIFTY": {
@@ -60,7 +60,7 @@ INSTRUMENT_MAP = {
         "sl_cap": 45.0,
         "min_spot": 8000.0,
         "max_spot": 25000.0,
-        "exact_names": ["MIDCPNIFTY", "MIDCAP NIFTY", "NIFTY MID SELECT"],
+        "exact_names": ["MIDCPNIFTY", "MIDCAP NIFTY", "NIFTY MID SELECT", "NIFTY MIDCAP SELECT"],
         "keywords": ["MIDCPNIFTY", "MIDCAP NIFTY", "NIFTY MID SELECT"],
     },
     "SENSEX": {
@@ -184,6 +184,17 @@ def sahi_headers() -> dict:
     return headers
 
 
+def looks_like_derivative_or_alt(sym_upper: str) -> bool:
+    # Avoid futures/options/expiry contracts or prefixed/suffixed alt symbols
+    if any(ch.isdigit() for ch in sym_upper) and sym_upper not in ("NIFTY 50", "NIFTY50"):
+        return True
+    if sym_upper.endswith(("CE", "PE", "FUT")) or "NOV26" in sym_upper or "DEC26" in sym_upper:
+        return True
+    if sym_upper.startswith(("AONE", "E")):
+        return True
+    return False
+
+
 def pick_best_instrument_row(sub_df: pd.DataFrame, sym_col: str, exact_names: list[str], keywords: list[str]):
     upper_series = sub_df[sym_col].fillna("").astype(str).str.strip().str.upper()
 
@@ -193,15 +204,19 @@ def pick_best_instrument_row(sub_df: pd.DataFrame, sym_col: str, exact_names: li
         if len(exact_matches) > 0:
             return exact_matches.iloc[0]
 
-    # 2. Prefer spot/index rows if instrument_type / segment column exists
-    cand_df = sub_df[upper_series.apply(lambda s: any(k.upper() in s for k in keywords))]
+    # 2. Filter out derivatives/alt symbols and prefer spot/index
+    cand_df = sub_df[
+        upper_series.apply(lambda s: any(k.upper() in s for k in keywords) and not looks_like_derivative_or_alt(s))
+    ]
+    if len(cand_df) == 0:
+        cand_df = sub_df[upper_series.apply(lambda s: any(k.upper() in s for k in keywords))]
     if len(cand_df) == 0:
         return None
 
     for col in ["instrument_type", "segment", "type", "series"]:
         if col in cand_df.columns:
             t_series = cand_df[col].fillna("").astype(str).str.upper()
-            idx_matches = cand_df[t_series.str.contains("INDEX|SPOT|EQ", regex=True)]
+            idx_matches = cand_df[t_series.str.contains("INDEX|SPOT", regex=True)]
             if len(idx_matches) > 0:
                 return idx_matches.iloc[0]
 
@@ -253,7 +268,6 @@ def auto_resolve_instrument_ids():
 
 
 def convert_paise_if_needed(val: float, min_spot: float, max_spot: float) -> float | None:
-    """Sahi prices paise ma hoy to 100 vade bhagi ne spot range ma validate kare."""
     if min_spot <= val <= max_spot:
         return round(val, 2)
     as_rupees = val / 100.0
@@ -372,20 +386,37 @@ def fetch_sahi_candles_and_oi(symbol: str, cfg: dict):
         return None, None
 
     try:
-        # 1. Try candles with multiple common size formats
-        df = None
-        for sz in ["5m", "5", "1m", "1"]:
-            c_url = f"{SAHI_API_BASE_URL}/v1/marketdata/candles"
-            c_params = {"i": int(inst_id), "instrument_id": int(inst_id), "size": sz, "interval": sz}
-            c_resp = requests.get(c_url, headers=sahi_headers(), params=c_params, timeout=15)
-            print(f"[{symbol}] Sahi Candles (size={sz}) HTTP {c_resp.status_code}: {c_resp.text[:220]}")
-            if c_resp.status_code == 200:
-                parsed = parse_candles_payload(c_resp.json(), min_spot, max_spot)
-                if parsed is not None:
-                    df = parsed
-                    break
+        now_dt = datetime.now(IST)
+        from_dt = now_dt - timedelta(days=3)
+        c_url = f"{SAHI_API_BASE_URL}/v1/marketdata/candles"
 
-        # 2. Try LTP endpoint for exact live price
+        # Single call with ISO timestamps; fallback once to epoch if needed
+        c_params = {
+            "i": int(inst_id),
+            "instrument_id": int(inst_id),
+            "size": "5m",
+            "from": from_dt.isoformat(),
+            "to": now_dt.isoformat(),
+        }
+        c_resp = requests.get(c_url, headers=sahi_headers(), params=c_params, timeout=15)
+        print(f"[{symbol}] Sahi Candles (size=5m, ISO) HTTP {c_resp.status_code}: {c_resp.text[:220]}")
+
+        if c_resp.status_code == 400 and "from" in c_resp.text.lower():
+            time.sleep(1.0)
+            c_params_epoch = {
+                "i": int(inst_id),
+                "instrument_id": int(inst_id),
+                "size": "5m",
+                "from": int(from_dt.timestamp()),
+                "to": int(now_dt.timestamp()),
+            }
+            c_resp = requests.get(c_url, headers=sahi_headers(), params=c_params_epoch, timeout=15)
+            print(f"[{symbol}] Sahi Candles (size=5m, epoch) HTTP {c_resp.status_code}: {c_resp.text[:220]}")
+
+        df = parse_candles_payload(c_resp.json(), min_spot, max_spot) if c_resp.status_code == 200 else None
+
+        time.sleep(1.0)
+
         ltp_url = f"{SAHI_API_BASE_URL}/v1/marketdata/ltp"
         ltp_resp = requests.get(ltp_url, headers=sahi_headers(), params={"i": int(inst_id)}, timeout=15)
         print(f"[{symbol}] Sahi LTP HTTP {ltp_resp.status_code}: {ltp_resp.text[:220]}")
@@ -405,10 +436,11 @@ def fetch_sahi_candles_and_oi(symbol: str, cfg: dict):
                 "Volume": [100000, 120000, 110000, 130000, 140000, 160000],
             })
         elif df is None:
-            print(f"[{symbol}] No valid spot price in range [{min_spot}..{max_spot}] from Sahi -> skipping alert.")
+            print(f"[{symbol}] No valid spot price in range [{min_spot}..{max_spot}] -> skipping alert.")
             return None, None
 
-        # 3. Option Chain
+        time.sleep(1.0)
+
         oc_url = f"{SAHI_API_BASE_URL}/v1/marketdata/optionchain"
         oc_params = {"underlying_id": int(inst_id), "i": int(inst_id), "instrument_id": int(inst_id)}
         oc_resp = requests.get(oc_url, headers=sahi_headers(), params=oc_params, timeout=15)
@@ -468,7 +500,7 @@ def generate_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict):
     current_close = float(closes[-1])
     impulse_range = max(p2_high - p1_low, 1.0)
     sl_cap = float(cfg.get("sl_cap", 65.0))
-    min_gap = max(impulse_range * 0.15, 10.0)
+    min_gap = max(impulse_range * 0.15, round(current_close * 0.002, 2), 1.0)
 
     vol_mult, body_pct, bull_candle, footprint_ok, pcr, oi_bias = analyze_footprint_and_oi(df, oi)
 
@@ -562,7 +594,7 @@ def main():
         append_trade_log(log_row)
         if send_telegram_alert(msg):
             sent += 1
-        time.sleep(1)
+        time.sleep(2.0)
     print(f"Sent {sent}/{len(INSTRUMENT_MAP)} alerts and updated {LOG_FILE}.")
 
 
