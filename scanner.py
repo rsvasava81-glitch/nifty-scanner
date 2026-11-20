@@ -128,29 +128,34 @@ def mint_sahi_token() -> str | None:
     if ACTIVE_BEARER_TOKEN:
         return ACTIVE_BEARER_TOKEN
 
-    url = f"{SAHI_AUTH_BASE_URL}/api/v1/apikeys/token"
-    if SAHI_KEY_ID and SAHI_SECRET:
-        try:
-            payload = {"key_id": SAHI_KEY_ID, "secret": SAHI_SECRET}
-            resp = requests.post(
-                url,
-                json=payload,
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-                timeout=15,
-            )
-            print(f"Token Mint [{url}] -> HTTP {resp.status_code}: {resp.text[:160]}")
-            if resp.status_code in (200, 201):
-                tok = extract_token(resp.json())
-                if tok:
-                    ACTIVE_BEARER_TOKEN = tok
-                    print("Successfully minted Sahi Bearer token.")
-                    return ACTIVE_BEARER_TOKEN
-        except Exception as e:
-            print(f"Token Mint Exception ({url}): {e}")
-
-    if EXPLICIT_ACCESS_TOKEN:
+    if EXPLICIT_ACCESS_TOKEN and EXPLICIT_ACCESS_TOKEN.strip():
         ACTIVE_BEARER_TOKEN = EXPLICIT_ACCESS_TOKEN.strip()
+        print("Using SAHI_ACCESS_TOKEN from env.")
         return ACTIVE_BEARER_TOKEN
+
+    if not SAHI_KEY_ID or not SAHI_SECRET:
+        print(f"Token Mint skipped: has_key_id={bool(SAHI_KEY_ID)}, has_secret={bool(SAHI_SECRET)}")
+        return None
+
+    url = f"{SAHI_AUTH_BASE_URL}/api/v1/apikeys/token"
+    try:
+        payload = {"key_id": SAHI_KEY_ID.strip(), "secret": SAHI_SECRET.strip()}
+        resp = requests.post(
+            url,
+            json=payload,
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            timeout=15,
+        )
+        print(f"Token Mint [{url}] -> HTTP {resp.status_code}: {resp.text[:180]}")
+        if resp.status_code in (200, 201):
+            tok = extract_token(resp.json())
+            if tok:
+                ACTIVE_BEARER_TOKEN = tok
+                print("Successfully minted Sahi Bearer token.")
+                return ACTIVE_BEARER_TOKEN
+    except Exception as e:
+        print(f"Token Mint Exception ({url}): {e}")
+
     return None
 
 
@@ -186,27 +191,30 @@ def auto_resolve_instrument_ids():
                 continue
 
             for sym in missing:
-                exch = INSTRUMENT_MAP[sym]["exchange"]
-                kws = [k.upper() for k in INSTRUMENT_MAP[sym]["keywords"]]
+                exch = str(INSTRUMENT_MAP[sym]["exchange"] or "").upper()
+                kws = [str(k).upper() for k in INSTRUMENT_MAP[sym]["keywords"]]
                 sub_df = df_sm
                 if "exchange" in df_sm.columns:
-                    ex_matches = df_sm[df_sm["exchange"].astype(str).str.upper() == exch.upper()]
+                    ex_series = df_sm["exchange"].fillna("").astype(str).str.upper()
+                    ex_matches = df_sm[ex_series == exch]
                     if len(ex_matches) > 0:
                         sub_df = ex_matches
 
-                mask = sub_df[sym_col].astype(str).str.upper().apply(lambda s: any(k in s for k in kws))
+                sym_series = sub_df[sym_col].fillna("").astype(str).str.upper()
+                mask = sym_series.apply(lambda s: any(k in s for k in kws))
                 matches = sub_df[mask]
                 if len(matches) > 0:
-                    found_id = str(matches.iloc[0][id_col]).strip()
-                    INSTRUMENT_MAP[sym]["instrument_id"] = found_id
-                    print(f"[{sym}] Resolved instrument_id ({id_col}) -> {found_id}")
+                    raw_id = matches.iloc[0][id_col]
+                    if pd.notna(raw_id):
+                        found_id = str(raw_id).strip()
+                        INSTRUMENT_MAP[sym]["instrument_id"] = found_id
+                        print(f"[{sym}] Resolved instrument_id ({id_col}) -> {found_id}")
             return
         except Exception as e:
             print(f"Scripmaster lookup ({url}) skipped: {e}")
 
 
 def normalize_paise_series(series: pd.Series) -> pd.Series:
-    """Sahi docs mujab prices paise ma hoy to 100 vade bhagi ne rupees ma convert kare."""
     s = pd.to_numeric(series, errors="coerce")
     med = float(s.dropna().median()) if len(s.dropna()) > 0 else 0.0
     if med > 200000.0:
