@@ -372,63 +372,16 @@ def get_swings(highs: np.ndarray, lows: np.ndarray):
     return h1, h2, l1, l2
 
 
-def check_retest_hold_continuation(
-    direction: str,
-    zone_low: float,
-    zone_high: float,
-    p3_anchor: float,
-    highs: np.ndarray,
-    lows: np.ndarray,
-    opens: np.ndarray,
-    closes: np.ndarray,
-):
+def build_fib_signal(symbol: str, cfg: dict, df: pd.DataFrame):
     """
-    Check if price entered 0.5-0.618 zone, held without invalidating P3/zone,
-    and whether latest candle confirms trend continuation.
-    Returns: (logic_str, is_confirmed_continuation)
+    Returns (msg, row) if valid setup exists, or (None, None) when pullback fails to hold.
+    Rules:
+    - 3-Point Trend Fib with P3 = P1.
+    - First stage targets: 1.414 and 1.618 (plus 2.0 reference); if candle closes beyond 1.618,
+      next targets shift to 2.0, 2.272, 2.618.
+    - If rejected at a target, let price retrace to nearest swing's 0.5-0.618 zone:
+      hold/reject there -> new targets; fail to hold -> no signal (None).
     """
-    c_open, c_high, c_low, c_close = float(opens[-1]), float(highs[-1]), float(lows[-1]), float(closes[-1])
-    p_close = float(closes[-2])
-    p_low, p_high = float(lows[-2]), float(highs[-2])
-
-    pad = max((zone_high - zone_low) * 0.25, c_close * 0.0005, 1.0)
-    z_bot = min(zone_low, zone_high) - pad
-    z_top = max(zone_low, zone_high) + pad
-
-    entered_zone = (
-        (c_low <= z_top and c_high >= z_bot)
-        or (p_low <= z_top and p_high >= z_bot)
-    )
-
-    if direction == "CE":
-        # Invalidated if closed below P3 anchor with margin
-        broken_down = c_close < (p3_anchor - max(c_close * 0.0005, 1.0))
-        held_zone = entered_zone and (not broken_down) and (c_low >= p3_anchor * 0.998)
-        continues = held_zone and (c_close > c_open) and (c_close >= p_close)
-
-        if continues:
-            return "HH+HL + 0.5-0.618 Hold & Trend Continues (P3=P1)", True
-        if held_zone:
-            return "HH+HL + 0.5-0.618 Zone Hold (Wait Trend Continue)", False
-        if broken_down:
-            return "HH+HL + Zone/P3 Broken (No Hold - Caution)", False
-        return "HH+HL Uptrend (Waiting 0.5-0.618 Retest, P3=P1)", False
-
-    else:  # PE
-        broken_up = c_close > (p3_anchor + max(c_close * 0.0005, 1.0))
-        held_zone = entered_zone and (not broken_up) and (c_high <= p3_anchor * 1.002)
-        continues = held_zone and (c_close < c_open) and (c_close <= p_close)
-
-        if continues:
-            return "LH+LL + 0.5-0.618 Hold & Trend Continues (P3=P1)", True
-        if held_zone:
-            return "LH+LL + 0.5-0.618 Zone Hold (Wait Trend Continue)", False
-        if broken_up:
-            return "LH+LL + Zone/P3 Broken (No Hold - Caution)", False
-        return "LH+LL Downtrend (Waiting 0.5-0.618 Retest, P3=P1)", False
-
-
-def build_short_signal(symbol: str, cfg: dict, df: pd.DataFrame):
     highs = df["High"].astype(float).values
     lows = df["Low"].astype(float).values
     closes = df["Close"].astype(float).values
@@ -436,14 +389,20 @@ def build_short_signal(symbol: str, cfg: dict, df: pd.DataFrame):
 
     h1, h2, l1, l2 = get_swings(highs, lows)
     entry = float(closes[-1])
-    last_open = float(opens[-1])
+    c_open = float(opens[-1])
+    c_high = float(highs[-1])
+    c_low = float(lows[-1])
+    p_close = float(closes[-2])
+    p_open = float(opens[-2])
+    p_high = float(highs[-2])
+    p_low = float(lows[-2])
     max_sl = float(cfg["sl_points"])
 
     is_uptrend = (h2 > h1) and (l2 > l1)
     is_downtrend = (h2 < h1) and (l2 < l1)
 
     if is_uptrend:
-        # 3-Point Trend Fib: P1 = L2, P2 = H2, P3 = P1 (L2)
+        # P1 = l2, P2 = h2 (or recent high), P3 = P1 (l2)
         p1 = l2
         p2 = max(h2, float(np.max(highs[-10:])))
         p3 = p1
@@ -452,18 +411,60 @@ def build_short_signal(symbol: str, cfg: dict, df: pd.DataFrame):
         fib_050 = p2 - 0.50 * leg
         fib_0618 = p2 - 0.618 * leg
 
-        t1 = round(p3 + 1.414 * leg, 2)
-        t2 = round(p3 + 1.618 * leg, 2)
-        t3 = round(p3 + 2.000 * leg, 2)
+        t_1414 = round(p3 + 1.414 * leg, 2)
+        t_1618 = round(p3 + 1.618 * leg, 2)
+        t_2000 = round(p3 + 2.000 * leg, 2)
+        t_2272 = round(p3 + 2.272 * leg, 2)
+        t_2618 = round(p3 + 2.618 * leg, 2)
 
-        sl_dist = min(max_sl, max(entry - (p3 - leg * 0.05), round(entry * 0.0012, 2), 10.0))
-        sl = round(entry - sl_dist, 2)
+        # Check if price rejected from target (touched/near target without closing past)
+        rejected_at_target = (
+            (p_high >= t_1414 and p_close <= t_1414 and c_close < p_high)
+            or (c_high >= t_1414 and c_close < t_1414 and c_close < c_open)
+        )
 
-        side = "CALL (CE)"
-        logic, _ = check_retest_hold_continuation("CE", fib_0618, fib_050, p3, highs, lows, opens, closes)
+        if rejected_at_target:
+            # Allow pullback to nearest swing 0.5 - 0.618 zone
+            z_top = max(fib_050, fib_0618)
+            z_bot = min(fib_050, fib_0618)
+            pad = max((z_top - z_bot) * 0.25, entry * 0.0005, 1.0)
+            in_retrace_zone = (c_low <= z_top + pad) and (c_high >= z_bot - pad)
+            failed_hold = c_close < (z_bot - pad)
+
+            if failed_hold:
+                print(f"[{symbol}] Target rejection -> failed to hold 0.5-0.618 zone -> no signal.")
+                return None, None
+
+            if in_retrace_zone and (c_close >= c_open or c_low <= z_top):
+                # New base from 0.618/P3 for fresh leg
+                new_base = min(p3, z_bot)
+                new_leg = max(entry - new_base, leg * 0.6, 1.0)
+                t1 = round(entry + 1.414 * new_leg, 2)
+                t2 = round(entry + 1.618 * new_leg, 2)
+                t3 = round(entry + 2.272 * new_leg, 2)
+                sl = round(entry - min(max_sl, max(entry - (z_bot - pad), 10.0)), 2)
+                side = "CALL (CE)"
+                logic = "Target Reject -> 0.5-0.618 Hold/Reject New Leg"
+            else:
+                # Still pulling back toward 0.5-0.618; wait for zone hold/reject
+                print(f"[{symbol}] Target rejection -> pulling back toward 0.5-0.618 zone -> no signal yet.")
+                return None, None
+        else:
+            # Closed above 1.618 -> next targets 2.0 and 2.272 (and 2.618)
+            if p_close > t_1618 or c_close > t_1618:
+                t1, t2, t3 = t_2000, t_2272, t_2618
+                logic = "HH+HL + Closed >1.618 -> Next Targets 2 & 2.272"
+            else:
+                # 0.5 rejection/hold -> first targets 1.414 to 1.618 (with 2.0)
+                t1, t2, t3 = t_1414, t_1618, t_2000
+                logic = "HH+HL + 0.5 Reject/Hold -> Targets 1.414-1.618 (P3=P1)"
+
+            sl_dist = min(max_sl, max(entry - (min(fib_0618, p3) - leg * 0.05), round(entry * 0.0012, 2), 10.0))
+            sl = round(entry - sl_dist, 2)
+            side = "CALL (CE)"
 
     elif is_downtrend:
-        # 3-Point Trend Fib: P1 = H2, P2 = L2, P3 = P1 (H2)
+        # P1 = h2, P2 = l2 (or recent low), P3 = P1 (h2)
         p1 = h2
         p2 = min(l2, float(np.min(lows[-10:])))
         p3 = p1
@@ -472,33 +473,77 @@ def build_short_signal(symbol: str, cfg: dict, df: pd.DataFrame):
         fib_050 = p2 + 0.50 * leg
         fib_0618 = p2 + 0.618 * leg
 
-        t1 = round(p3 - 1.414 * leg, 2)
-        t2 = round(p3 - 1.618 * leg, 2)
-        t3 = round(p3 - 2.000 * leg, 2)
+        t_1414 = round(p3 - 1.414 * leg, 2)
+        t_1618 = round(p3 - 1.618 * leg, 2)
+        t_2000 = round(p3 - 2.000 * leg, 2)
+        t_2272 = round(p3 - 2.272 * leg, 2)
+        t_2618 = round(p3 - 2.618 * leg, 2)
 
-        sl_dist = min(max_sl, max((p3 + leg * 0.05) - entry, round(entry * 0.0012, 2), 10.0))
-        sl = round(entry + sl_dist, 2)
+        rejected_at_target = (
+            (p_low <= t_1414 and p_close >= t_1414 and c_close > p_low)
+            or (c_low <= t_1414 and c_close > t_1414 and c_close > c_open)
+        )
 
-        side = "PUT (PE)"
-        logic, _ = check_retest_hold_continuation("PE", fib_050, fib_0618, p3, highs, lows, opens, closes)
+        if rejected_at_target:
+            z_bot = min(fib_050, fib_0618)
+            z_top = max(fib_050, fib_0618)
+            pad = max((z_top - z_bot) * 0.25, entry * 0.0005, 1.0)
+            in_retrace_zone = (c_high >= z_bot - pad) and (c_low <= z_top + pad)
+            failed_hold = c_close > (z_top + pad)
+
+            if failed_hold:
+                print(f"[{symbol}] Target rejection -> failed to hold 0.5-0.618 zone -> no signal.")
+                return None, None
+
+            if in_retrace_zone and (c_close <= c_open or c_high >= z_bot):
+                new_top = max(p3, z_top)
+                new_leg = max(new_top - entry, leg * 0.6, 1.0)
+                t1 = round(entry - 1.414 * new_leg, 2)
+                t2 = round(entry - 1.618 * new_leg, 2)
+                t3 = round(entry - 2.272 * new_leg, 2)
+                sl = round(entry + min(max_sl, max((z_top + pad) - entry, 10.0)), 2)
+                side = "PUT (PE)"
+                logic = "Target Reject -> 0.5-0.618 Hold/Reject New Leg"
+            else:
+                print(f"[{symbol}] Target rejection -> pulling back toward 0.5-0.618 zone -> no signal yet.")
+                return None, None
+        else:
+            if p_close < t_1618 or c_close < t_1618:
+                t1, t2, t3 = t_2000, t_2272, t_2618
+                logic = "LH+LL + Closed <1.618 -> Next Targets 2 & 2.272"
+            else:
+                t1, t2, t3 = t_1414, t_1618, t_2000
+                logic = "LH+LL + 0.5 Reject/Hold -> Targets 1.414-1.618 (P3=P1)"
+
+            sl_dist = min(max_sl, max((max(fib_0618, p3) + leg * 0.05) - entry, round(entry * 0.0012, 2), 10.0))
+            sl = round(entry + sl_dist, 2)
+            side = "PUT (PE)"
 
     else:
-        mid = (h2 + l2) / 2.0
+        # No clear HH+HL or LH+LL trend -> check nearest swing 0.5-0.618 hold/reject
         leg = max(h2 - l2, round(entry * 0.002, 2), 1.0)
-        if entry >= mid and entry >= last_open:
+        z_050 = l2 + 0.50 * leg
+        z_0618 = l2 + 0.618 * leg
+        z_bot, z_top = min(z_050, z_0618), max(z_050, z_0618)
+        pad = max((z_top - z_bot) * 0.25, entry * 0.0005, 1.0)
+
+        if entry >= z_050 and c_close >= c_open:
             side = "CALL (CE)"
-            logic = "Above Mid Range + Bullish Candle"
-            sl = round(entry - min(max_sl, max(entry - l2, 10.0)), 2)
+            logic = "Above 0.5 Zone Hold -> Targets 1.414-1.618"
+            sl = round(entry - min(max_sl, max(entry - (z_bot - pad), 10.0)), 2)
             t1 = round(l2 + 1.414 * leg, 2)
             t2 = round(l2 + 1.618 * leg, 2)
-            t3 = round(l2 + 2.000 * leg, 2)
-        else:
+            t3 = round(l2 + 2.272 * leg, 2)
+        elif entry <= z_0618 and c_close <= c_open:
             side = "PUT (PE)"
-            logic = "Below Mid Range + Bearish Candle"
-            sl = round(entry + min(max_sl, max(h2 - entry, 10.0)), 2)
+            logic = "Below 0.618 Zone Reject -> Targets 1.414-1.618"
+            sl = round(entry + min(max_sl, max((z_top + pad) - entry, 10.0)), 2)
             t1 = round(h2 - 1.414 * leg, 2)
             t2 = round(h2 - 1.618 * leg, 2)
-            t3 = round(h2 - 2.000 * leg, 2)
+            t3 = round(h2 - 2.272 * leg, 2)
+        else:
+            print(f"[{symbol}] No hold at 0.5-0.618 zone -> no signal.")
+            return None, None
 
     msg = (
         f"{symbol} ({cfg['exchange']}) | {side}\n"
@@ -571,7 +616,10 @@ def main():
         if df is None:
             time.sleep(5.0)
             continue
-        msg, row = build_short_signal(sym, cfg, df)
+        msg, row = build_fib_signal(sym, cfg, df)
+        if msg is None or row is None:
+            time.sleep(4.0)
+            continue
         save_log(row)
         if send_telegram(msg):
             sent_count += 1
