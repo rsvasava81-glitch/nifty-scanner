@@ -1,14 +1,23 @@
 import os
+import csv
 import time
+from datetime import datetime, timezone, timedelta
 import requests
 import pandas as pd
 import numpy as np
 
+IST = timezone(timedelta(hours=5, minutes=30))
+LOG_FILE = "trade_log.csv"
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-SAHI_BASE_URL = os.environ.get("SAHI_BASE_URL", "https://api.sahi.com")
-SAHI_ACCESS_TOKEN = os.environ.get("SAHI_ACCESS_TOKEN") or os.environ.get("SAHI_API_KEY") or os.environ.get("SAHI_KEY_ID")
+SAHI_BASE_URL = (os.environ.get("SAHI_BASE_URL") or "https://api.sahi.com").rstrip("/")
+SAHI_ACCESS_TOKEN = (
+    os.environ.get("SAHI_ACCESS_TOKEN")
+    or os.environ.get("SAHI_API_KEY")
+    or os.environ.get("SAHI_KEY_ID")
+)
 
 INSTRUMENT_MAP = {
     "NIFTY 50": {"instrument_id": os.environ.get("NIFTY_INST_ID"), "exchange": "NSE", "sl_cap": 65.0},
@@ -40,6 +49,33 @@ def send_telegram_alert(message: str) -> bool:
         return False
 
 
+def append_trade_log(row: dict):
+    fieldnames = [
+        "timestamp_ist",
+        "symbol",
+        "exchange",
+        "source",
+        "conviction",
+        "side",
+        "entry_close",
+        "stop_loss",
+        "p1_low",
+        "p2_high",
+        "base_0",
+        "achieved",
+        "next_target",
+        "vol_mult",
+        "body_pct",
+        "pcr",
+    ]
+    file_exists = os.path.isfile(LOG_FILE) and os.path.getsize(LOG_FILE) > 0
+    with open(LOG_FILE, mode="a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
 def sahi_headers() -> dict:
     return {
         "Authorization": f"Bearer {SAHI_ACCESS_TOKEN}",
@@ -57,7 +93,6 @@ def parse_candles_payload(payload_json) -> pd.DataFrame | None:
     if not isinstance(rows, list) or len(rows) < 6:
         return None
 
-    # Handle list of dicts vs list of lists [timestamp, open, high, low, close, volume]
     if isinstance(rows[0], dict):
         df = pd.DataFrame(rows)
         rename_map = {
@@ -139,7 +174,6 @@ def fetch_sahi_candles_and_oi(symbol: str, cfg: dict):
     else:
         print(f"[{symbol}] Missing SAHI_ACCESS_TOKEN or instrument_id -> using Fallback.")
 
-    # Fallback structure (when live credentials/IDs are not yet configured)
     if symbol == "NIFTY 50":
         df = pd.DataFrame({
             "Open":   [25710.0, 25735.0, 25755.0, 25742.0, 25765.0, 25782.0],
@@ -190,7 +224,7 @@ def analyze_footprint_and_oi(df: pd.DataFrame, oi: dict):
     return vol_mult, body_pct, bull_candle, footprint_ok, pcr, oi_bias
 
 
-def generate_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict) -> str:
+def generate_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict):
     highs = df["High"].astype(float).values
     lows = df["Low"].astype(float).values
     closes = df["Close"].astype(float).values
@@ -257,7 +291,8 @@ def generate_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict) -> str:
             achieved, next_target = "Top / Pullback", f"{t_05:.2f} (0.50 Ext)"
 
     tag = "HIGH CONVICTION" if (footprint_ok and oi_bias != "NEUTRAL") else "MODERATE"
-    return (
+    src = oi.get("source", "OC")
+    msg = (
         f"F&O Setup: {symbol} ({cfg['exchange']}) [{tag}]\n"
         f"------------------------------------------\n"
         f"Side: {side}\n"
@@ -267,19 +302,39 @@ def generate_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict) -> str:
         f"Achieved Level: {achieved}\n"
         f"Next Target: {next_target}\n"
         f"Footprint: Vol x{vol_mult} | Body {body_pct}%\n"
-        f"Option Chain ({oi.get('source', 'OC')}): PCR {pcr:.2f} | {oi_bias} | Call {oi.get('call_oi', 0):.1f}L / Put {oi.get('put_oi', 0):.1f}L"
+        f"Option Chain ({src}): PCR {pcr:.2f} | {oi_bias} | Call {oi.get('call_oi', 0):.1f}L / Put {oi.get('put_oi', 0):.1f}L"
     )
+    log_row = {
+        "timestamp_ist": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol": symbol,
+        "exchange": cfg["exchange"],
+        "source": src,
+        "conviction": tag,
+        "side": side,
+        "entry_close": round(current_close, 2),
+        "stop_loss": round(sl, 2),
+        "p1_low": round(p1_low, 2),
+        "p2_high": round(p2_high, 2),
+        "base_0": round(p3_base, 2),
+        "achieved": achieved,
+        "next_target": next_target,
+        "vol_mult": vol_mult,
+        "body_pct": body_pct,
+        "pcr": pcr,
+    }
+    return msg, log_row
 
 
 def main():
     sent = 0
     for sym, cfg in INSTRUMENT_MAP.items():
         df, oi = fetch_sahi_candles_and_oi(sym, cfg)
-        msg = generate_signal(sym, cfg, df, oi)
+        msg, log_row = generate_signal(sym, cfg, df, oi)
+        append_trade_log(log_row)
         if send_telegram_alert(msg):
             sent += 1
         time.sleep(1)
-    print(f"Sent {sent}/{len(INSTRUMENT_MAP)} alerts.")
+    print(f"Sent {sent}/{len(INSTRUMENT_MAP)} alerts and updated {LOG_FILE}.")
 
 
 if __name__ == "__main__":
