@@ -312,6 +312,7 @@ def fetch_market_data(symbol: str, cfg: dict, inst_id: str, headers: dict):
     df = None
     if c_resp is not None:
         print(f"[{symbol}] Candles HTTP {c_resp.status_code}")
+        print(f"[{symbol}] Candles body: {c_resp.text[:300]}")
         if c_resp.status_code == 200:
             try:
                 df = parse_candles(c_resp.json(), min_p, max_p)
