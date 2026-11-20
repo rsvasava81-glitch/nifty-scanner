@@ -7,11 +7,9 @@ import numpy as np
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# Sahi API config (set SAHI_ACCESS_TOKEN in GitHub Secrets)
 SAHI_BASE_URL = os.environ.get("SAHI_BASE_URL", "https://api.sahi.com")
-SAHI_ACCESS_TOKEN = os.environ.get("SAHI_ACCESS_TOKEN") or os.environ.get("SAHI_KEY_ID")
+SAHI_ACCESS_TOKEN = os.environ.get("SAHI_ACCESS_TOKEN") or os.environ.get("SAHI_API_KEY") or os.environ.get("SAHI_KEY_ID")
 
-# Sahi scrip-master na integer instrument_id ahi fill karo (e.g., {"NIFTY 50": 12345, ...})
 INSTRUMENT_MAP = {
     "NIFTY 50": {"instrument_id": os.environ.get("NIFTY_INST_ID"), "exchange": "NSE", "sl_cap": 65.0},
     "BANKNIFTY": {"instrument_id": os.environ.get("BANKNIFTY_INST_ID"), "exchange": "NSE", "sl_cap": 150.0},
@@ -45,86 +43,115 @@ def send_telegram_alert(message: str) -> bool:
 def sahi_headers() -> dict:
     return {
         "Authorization": f"Bearer {SAHI_ACCESS_TOKEN}",
+        "x-api-key": str(SAHI_ACCESS_TOKEN or ""),
         "Accept": "application/json",
     }
 
 
+def parse_candles_payload(payload_json) -> pd.DataFrame | None:
+    if not isinstance(payload_json, dict):
+        return None
+    rows = payload_json.get("data") or payload_json.get("candles") or payload_json.get("ohlc") or []
+    if isinstance(rows, dict):
+        rows = rows.get("candles") or rows.get("data") or []
+    if not isinstance(rows, list) or len(rows) < 6:
+        return None
+
+    # Handle list of dicts vs list of lists [timestamp, open, high, low, close, volume]
+    if isinstance(rows[0], dict):
+        df = pd.DataFrame(rows)
+        rename_map = {
+            "open": "Open", "o": "Open",
+            "high": "High", "h": "High",
+            "low": "Low", "l": "Low",
+            "close": "Close", "c": "Close",
+            "volume": "Volume", "v": "Volume",
+        }
+        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+    elif isinstance(rows[0], (list, tuple)) and len(rows[0]) >= 5:
+        cols = ["Time", "Open", "High", "Low", "Close", "Volume"][: len(rows[0])]
+        df = pd.DataFrame(rows, columns=cols)
+    else:
+        return None
+
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["High", "Low", "Close"]).tail(40).reset_index(drop=True)
+    return df if len(df) >= 6 else None
+
+
+def parse_oi_payload(payload_json) -> dict | None:
+    if not isinstance(payload_json, dict):
+        return None
+    raw = payload_json.get("data") or payload_json.get("chain") or payload_json.get("option_chain") or []
+    chain = raw.get("chain") if isinstance(raw, dict) else raw
+    if not isinstance(chain, list) or len(chain) == 0:
+        return None
+
+    total_call_oi = 0.0
+    total_put_oi = 0.0
+    for row in chain:
+        if not isinstance(row, dict):
+            continue
+        ce = row.get("CE") or row.get("ce") or row.get("call") or {}
+        pe = row.get("PE") or row.get("pe") or row.get("put") or {}
+        if isinstance(ce, dict):
+            total_call_oi += float(ce.get("oi") or ce.get("open_interest") or ce.get("OI") or 0.0)
+        if isinstance(pe, dict):
+            total_put_oi += float(pe.get("oi") or pe.get("open_interest") or pe.get("OI") or 0.0)
+
+    if total_call_oi <= 0 and total_put_oi <= 0:
+        return None
+
+    pcr = round(total_put_oi / max(total_call_oi, 1.0), 2)
+    return {
+        "pcr": pcr,
+        "call_oi": round(total_call_oi / 100000.0, 2),
+        "put_oi": round(total_put_oi / 100000.0, 2),
+        "source": "Sahi Live OC",
+    }
+
+
 def fetch_sahi_candles_and_oi(symbol: str, cfg: dict):
-    """
-    Sahi Market Data API mathi candles ane option chain (OI/PCR) fetch kare chhe.
-    Jo instrument_id / token missing hoy ke API empty response aape to fallback data aape chhe.
-    """
     inst_id = cfg.get("instrument_id")
 
     if SAHI_ACCESS_TOKEN and inst_id:
         try:
-            # 1) Historical Candles
             c_url = f"{SAHI_BASE_URL}/v1/marketdata/candles"
             c_params = {"instrument_id": int(inst_id), "interval": "5m"}
             c_resp = requests.get(c_url, headers=sahi_headers(), params=c_params, timeout=15)
-            if c_resp.status_code == 200:
-                c_json = c_resp.json()
-                rows = c_json.get("data") or c_json.get("candles") or []
-                if len(rows) >= 6:
-                    df = pd.DataFrame(rows)
-                    rename_map = {
-                        "open": "Open", "high": "High", "low": "Low",
-                        "close": "Close", "volume": "Volume"
-                    }
-                    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-                    for col in ["Open", "High", "Low", "Close", "Volume"]:
-                        if col not in df.columns:
-                            df[col] = 0.0
-                    df = df[["Open", "High", "Low", "Close", "Volume"]].tail(40).reset_index(drop=True)
-                else:
-                    df = None
-            else:
-                print(f"[{symbol}] Sahi Candles Status: {c_resp.status_code}")
-                df = None
+            print(f"[{symbol}] Sahi Candles HTTP {c_resp.status_code}: {c_resp.text[:160]}")
+            df = parse_candles_payload(c_resp.json()) if c_resp.status_code == 200 else None
 
-            # 2) Option Chain OI & PCR
             oc_url = f"{SAHI_BASE_URL}/v1/marketdata/optionchain"
             oc_params = {"instrument_id": int(inst_id)}
             oc_resp = requests.get(oc_url, headers=sahi_headers(), params=oc_params, timeout=15)
-            oi_summary = None
-            if oc_resp.status_code == 200:
-                oc_json = oc_resp.json()
-                chain = oc_json.get("data") or oc_json.get("chain") or []
-                total_call_oi = 0.0
-                total_put_oi = 0.0
-                for row in chain:
-                    ce = row.get("CE") or row.get("call") or {}
-                    pe = row.get("PE") or row.get("put") or {}
-                    total_call_oi += float(ce.get("oi") or ce.get("open_interest") or 0.0)
-                    total_put_oi += float(pe.get("oi") or pe.get("open_interest") or 0.0)
-
-                if total_call_oi > 0 or total_put_oi > 0:
-                    pcr = round(total_put_oi / max(total_call_oi, 1.0), 2)
-                    oi_summary = {
-                        "pcr": pcr,
-                        "call_oi": round(total_call_oi / 100000.0, 2),  # Lakhs
-                        "put_oi": round(total_put_oi / 100000.0, 2),    # Lakhs
-                        "source": "Sahi Live OC",
-                    }
+            print(f"[{symbol}] Sahi OC HTTP {oc_resp.status_code}: {oc_resp.text[:160]}")
+            oi_summary = parse_oi_payload(oc_resp.json()) if oc_resp.status_code == 200 else None
 
             if df is not None and oi_summary is not None:
                 return df, oi_summary
         except Exception as e:
-            print(f"[{symbol}] Sahi API Error: {e}")
+            print(f"[{symbol}] Sahi API Exception: {e}")
+    else:
+        print(f"[{symbol}] Missing SAHI_ACCESS_TOKEN or instrument_id -> using Fallback.")
 
-    # Fallback structure (when instrument_id / token not set or market closed)
+    # Fallback structure (when live credentials/IDs are not yet configured)
     if symbol == "NIFTY 50":
         df = pd.DataFrame({
-            "Open":   [25165.0, 25198.0, 25215.0, 25202.0, 25212.0, 25224.0],
-            "High":   [25205.0, 25238.48, 25228.0, 25214.0, 25232.0, 25248.0],
-            "Low":    [25141.80, 25195.0, 25205.0, 25197.02, 25208.0, 25221.0],
-            "Close":  [25198.0, 25215.0, 25208.0, 25204.0, 25225.0, 25244.5],
-            "Volume": [110000, 185000, 120000, 105000, 195000, 240000],
+            "Open":   [25710.0, 25735.0, 25755.0, 25742.0, 25765.0, 25782.0],
+            "High":   [25742.0, 25785.0, 25772.0, 25760.0, 25792.0, 25804.0],
+            "Low":    [25695.0, 25728.0, 25738.0, 25725.0, 25752.0, 25775.0],
+            "Close":  [25735.0, 25768.0, 25748.0, 25755.0, 25784.0, 25799.60],
+            "Volume": [115000, 190000, 125000, 110000, 205000, 245000],
         })
         oi_summary = {"pcr": 1.18, "call_oi": 142.5, "put_oi": 168.2, "source": "Fallback"}
         return df, oi_summary
 
-    base = 51300.0 if "BANK" in symbol else (23300.0 if "FIN" in symbol else (12450.0 if "MID" in symbol else 82200.0))
+    base = 51500.0 if "BANK" in symbol else (23400.0 if "FIN" in symbol else (12500.0 if "MID" in symbol else 82500.0))
     step = base * 0.0015
     df = pd.DataFrame({
         "Open":   [base, base + step, base + 2 * step, base + 1.2 * step, base + 1.8 * step, base + 2.6 * step],
@@ -169,8 +196,6 @@ def generate_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict) -> str:
     closes = df["Close"].astype(float).values
     n = len(df)
 
-    # 3-Point Trend-Based Swing Detection:
-    # P1: Impulse Low | P2: Impulse High | P3: Pullback Base (0.0)
     p1_idx = int(np.argmin(lows[: max(1, n // 2)]))
     p1_low = float(lows[p1_idx])
 
