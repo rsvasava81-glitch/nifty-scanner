@@ -31,6 +31,8 @@ INSTRUMENT_MAP = {
         "instrument_id": os.environ.get("NIFTY_INST_ID"),
         "exchange": "NSE",
         "sl_cap": 65.0,
+        "min_spot": 15000.0,
+        "max_spot": 40000.0,
         "exact_names": ["NIFTY 50", "NIFTY50", "NIFTY"],
         "keywords": ["NIFTY 50", "NIFTY50", "NIFTY"],
     },
@@ -38,6 +40,8 @@ INSTRUMENT_MAP = {
         "instrument_id": os.environ.get("BANKNIFTY_INST_ID"),
         "exchange": "NSE",
         "sl_cap": 150.0,
+        "min_spot": 35000.0,
+        "max_spot": 95000.0,
         "exact_names": ["BANKNIFTY", "NIFTY BANK", "NIFTYBANK"],
         "keywords": ["BANKNIFTY", "NIFTY BANK"],
     },
@@ -45,6 +49,8 @@ INSTRUMENT_MAP = {
         "instrument_id": os.environ.get("FINNIFTY_INST_ID"),
         "exchange": "NSE",
         "sl_cap": 70.0,
+        "min_spot": 15000.0,
+        "max_spot": 45000.0,
         "exact_names": ["FINNIFTY", "NIFTY FIN SERVICE"],
         "keywords": ["FINNIFTY", "NIFTY FIN SERVICE"],
     },
@@ -52,6 +58,8 @@ INSTRUMENT_MAP = {
         "instrument_id": os.environ.get("MIDCAP_INST_ID"),
         "exchange": "NSE",
         "sl_cap": 45.0,
+        "min_spot": 8000.0,
+        "max_spot": 25000.0,
         "exact_names": ["MIDCPNIFTY", "MIDCAP NIFTY", "NIFTY MID SELECT"],
         "keywords": ["MIDCPNIFTY", "MIDCAP NIFTY", "NIFTY MID SELECT"],
     },
@@ -59,6 +67,8 @@ INSTRUMENT_MAP = {
         "instrument_id": os.environ.get("SENSEX_INST_ID"),
         "exchange": "BSE",
         "sl_cap": 200.0,
+        "min_spot": 50000.0,
+        "max_spot": 130000.0,
         "exact_names": ["SENSEX"],
         "keywords": ["SENSEX"],
     },
@@ -242,15 +252,17 @@ def auto_resolve_instrument_ids():
             print(f"Scripmaster lookup ({url}) skipped: {e}")
 
 
-def normalize_paise_series(series: pd.Series) -> pd.Series:
-    s = pd.to_numeric(series, errors="coerce")
-    med = float(s.dropna().median()) if len(s.dropna()) > 0 else 0.0
-    if med > 200000.0:
-        return s / 100.0
-    return s
+def convert_paise_if_needed(val: float, min_spot: float, max_spot: float) -> float | None:
+    """Sahi prices paise ma hoy to 100 vade bhagi ne spot range ma validate kare."""
+    if min_spot <= val <= max_spot:
+        return round(val, 2)
+    as_rupees = val / 100.0
+    if min_spot <= as_rupees <= max_spot:
+        return round(as_rupees, 2)
+    return None
 
 
-def parse_candles_payload(payload_json) -> pd.DataFrame | None:
+def parse_candles_payload(payload_json, min_spot: float, max_spot: float) -> pd.DataFrame | None:
     if not isinstance(payload_json, dict):
         return None
     rows = payload_json.get("data") or payload_json.get("candles") or payload_json.get("ohlc") or []
@@ -277,37 +289,44 @@ def parse_candles_payload(payload_json) -> pd.DataFrame | None:
 
     for col in ["Open", "High", "Low", "Close"]:
         if col not in df.columns:
-            df[col] = 0.0
-        df[col] = normalize_paise_series(df[col])
+            return None
+        s = pd.to_numeric(df[col], errors="coerce")
+        med = float(s.dropna().median()) if len(s.dropna()) > 0 else 0.0
+        if med > max_spot:
+            s = s / 100.0
+        df[col] = s
 
     if "Volume" not in df.columns:
-        df["Volume"] = 0.0
-    df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
+        df["Volume"] = 100000.0
+    df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(100000.0)
 
     df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["High", "Low", "Close"]).tail(40).reset_index(drop=True)
-    return df if len(df) >= 6 else None
+    if len(df) < 6:
+        return None
+
+    last_c = float(df["Close"].iloc[-1])
+    if not (min_spot <= last_c <= max_spot):
+        return None
+    return df
 
 
-def parse_ltp_into_df(payload_json, inst_id: str, fallback_df: pd.DataFrame) -> pd.DataFrame | None:
+def extract_valid_ltp(payload_json, inst_id: str, min_spot: float, max_spot: float) -> float | None:
     if not isinstance(payload_json, dict):
         return None
     data = payload_json.get("data")
-    ltp_val = None
-    if isinstance(data, dict):
-        entry = data.get(str(inst_id)) or next(iter(data.values()), None)
-        if isinstance(entry, dict):
-            raw_ltp = entry.get("last_trade_price") or entry.get("ltp") or entry.get("last_price")
-            if raw_ltp is not None:
-                val = float(raw_ltp)
-                ltp_val = val / 100.0 if val > 200000.0 else val
-    if ltp_val is None or ltp_val <= 0:
+    if not isinstance(data, dict):
         return None
-
-    out = fallback_df.copy()
-    out.loc[out.index[-1], "Close"] = ltp_val
-    out.loc[out.index[-1], "High"] = max(float(out.loc[out.index[-1], "High"]), ltp_val)
-    out.loc[out.index[-1], "Low"] = min(float(out.loc[out.index[-1], "Low"]), ltp_val)
-    return out
+    entry = data.get(str(inst_id)) or next(iter(data.values()), None)
+    if not isinstance(entry, dict):
+        return None
+    raw_ltp = entry.get("last_trade_price") or entry.get("ltp") or entry.get("last_price")
+    if raw_ltp is None:
+        return None
+    try:
+        val = float(raw_ltp)
+    except Exception:
+        return None
+    return convert_paise_if_needed(val, min_spot, max_spot)
 
 
 def parse_oi_payload(payload_json) -> dict | None:
@@ -342,72 +361,66 @@ def parse_oi_payload(payload_json) -> dict | None:
     }
 
 
-def build_fallback_df_and_oi(symbol: str):
-    if symbol == "NIFTY 50":
-        df = pd.DataFrame({
-            "Open":   [25710.0, 25735.0, 25755.0, 25742.0, 25765.0, 25782.0],
-            "High":   [25742.0, 25785.0, 25772.0, 25760.0, 25792.0, 25804.0],
-            "Low":    [25695.0, 25728.0, 25738.0, 25725.0, 25752.0, 25775.0],
-            "Close":  [25735.0, 25768.0, 25748.0, 25755.0, 25784.0, 25800.60],
-            "Volume": [115000, 190000, 125000, 110000, 205000, 245000],
-        })
-        oi_summary = {"pcr": 1.18, "call_oi": 142.5, "put_oi": 168.2, "source": "Fallback"}
-        return df, oi_summary
-
-    base = (
-        64635.20 if "BANK" in symbol else
-        (28871.20 if "FIN" in symbol else
-        (14305.15 if "MID" in symbol else
-        (83919.71 if "SENSEX" in symbol else 25800.60)))
-    )
-    step = base * 0.0015
-    df = pd.DataFrame({
-        "Open":   [base - 2.5 * step, base - 1.5 * step, base - 0.5 * step, base - 1.2 * step, base - 0.4 * step, base + 0.3 * step],
-        "High":   [base - 1.0 * step, base + 0.7 * step, base + 0.2 * step, base - 0.7 * step, base + 0.4 * step, base + 1.1 * step],
-        "Low":    [base - 3.3 * step, base - 1.6 * step, base - 1.4 * step, base - 2.0 * step, base - 1.4 * step, base - 0.4 * step],
-        "Close":  [base - 1.5 * step, base - 0.5 * step, base - 1.2 * step, base - 1.5 * step, base - 0.3 * step, base],
-        "Volume": [90000, 150000, 100000, 95000, 160000, 210000],
-    })
-    oi_summary = {"pcr": 1.06, "call_oi": 95.0, "put_oi": 100.7, "source": "Fallback"}
-    return df, oi_summary
-
-
 def fetch_sahi_candles_and_oi(symbol: str, cfg: dict):
     inst_id = cfg.get("instrument_id")
+    min_spot = float(cfg.get("min_spot", 1000.0))
+    max_spot = float(cfg.get("max_spot", 500000.0))
     token = mint_sahi_token()
-    fb_df, fb_oi = build_fallback_df_and_oi(symbol)
 
-    if token and inst_id:
-        try:
+    if not token or not inst_id:
+        print(f"[{symbol}] Skipping signal: missing token or instrument_id (token={bool(token)}, inst_id={inst_id})")
+        return None, None
+
+    try:
+        # 1. Try candles with multiple common size formats
+        df = None
+        for sz in ["5m", "5", "1m", "1"]:
             c_url = f"{SAHI_API_BASE_URL}/v1/marketdata/candles"
-            c_params = {"i": int(inst_id), "instrument_id": int(inst_id), "size": "5m", "interval": "5m"}
+            c_params = {"i": int(inst_id), "instrument_id": int(inst_id), "size": sz, "interval": sz}
             c_resp = requests.get(c_url, headers=sahi_headers(), params=c_params, timeout=15)
-            print(f"[{symbol}] Sahi Candles HTTP {c_resp.status_code}: {c_resp.text[:160]}")
-            df = parse_candles_payload(c_resp.json()) if c_resp.status_code == 200 else None
+            print(f"[{symbol}] Sahi Candles (size={sz}) HTTP {c_resp.status_code}: {c_resp.text[:220]}")
+            if c_resp.status_code == 200:
+                parsed = parse_candles_payload(c_resp.json(), min_spot, max_spot)
+                if parsed is not None:
+                    df = parsed
+                    break
 
-            if df is None:
-                ltp_url = f"{SAHI_API_BASE_URL}/v1/marketdata/ltp"
-                ltp_resp = requests.get(ltp_url, headers=sahi_headers(), params={"i": int(inst_id)}, timeout=15)
-                print(f"[{symbol}] Sahi LTP HTTP {ltp_resp.status_code}: {ltp_resp.text[:160]}")
-                if ltp_resp.status_code == 200:
-                    df = parse_ltp_into_df(ltp_resp.json(), str(inst_id), fb_df)
+        # 2. Try LTP endpoint for exact live price
+        ltp_url = f"{SAHI_API_BASE_URL}/v1/marketdata/ltp"
+        ltp_resp = requests.get(ltp_url, headers=sahi_headers(), params={"i": int(inst_id)}, timeout=15)
+        print(f"[{symbol}] Sahi LTP HTTP {ltp_resp.status_code}: {ltp_resp.text[:220]}")
+        valid_ltp = extract_valid_ltp(ltp_resp.json(), str(inst_id), min_spot, max_spot) if ltp_resp.status_code == 200 else None
 
-            oc_url = f"{SAHI_API_BASE_URL}/v1/marketdata/optionchain"
-            oc_params = {"underlying_id": int(inst_id), "i": int(inst_id), "instrument_id": int(inst_id)}
-            oc_resp = requests.get(oc_url, headers=sahi_headers(), params=oc_params, timeout=15)
-            print(f"[{symbol}] Sahi OC HTTP {oc_resp.status_code}: {oc_resp.text[:160]}")
-            oi_summary = parse_oi_payload(oc_resp.json()) if oc_resp.status_code == 200 else None
+        if df is not None and valid_ltp is not None:
+            df.loc[df.index[-1], "Close"] = valid_ltp
+            df.loc[df.index[-1], "High"] = max(float(df.loc[df.index[-1], "High"]), valid_ltp)
+            df.loc[df.index[-1], "Low"] = min(float(df.loc[df.index[-1], "Low"]), valid_ltp)
+        elif df is None and valid_ltp is not None:
+            step = max(valid_ltp * 0.001, 5.0)
+            df = pd.DataFrame({
+                "Open":   [valid_ltp - 1.5 * step, valid_ltp - 1.0 * step, valid_ltp - 0.8 * step, valid_ltp - 0.5 * step, valid_ltp - 0.2 * step, valid_ltp - 0.1 * step],
+                "High":   [valid_ltp - 0.8 * step, valid_ltp - 0.4 * step, valid_ltp - 0.2 * step, valid_ltp + 0.1 * step, valid_ltp + 0.2 * step, valid_ltp + 0.15 * step],
+                "Low":    [valid_ltp - 2.0 * step, valid_ltp - 1.4 * step, valid_ltp - 1.2 * step, valid_ltp - 0.9 * step, valid_ltp - 0.6 * step, valid_ltp - 0.3 * step],
+                "Close":  [valid_ltp - 1.0 * step, valid_ltp - 0.8 * step, valid_ltp - 0.5 * step, valid_ltp - 0.2 * step, valid_ltp - 0.1 * step, valid_ltp],
+                "Volume": [100000, 120000, 110000, 130000, 140000, 160000],
+            })
+        elif df is None:
+            print(f"[{symbol}] No valid spot price in range [{min_spot}..{max_spot}] from Sahi -> skipping alert.")
+            return None, None
 
-            if df is not None and oi_summary is not None:
-                return df, oi_summary
-            if df is not None:
-                return df, fb_oi
-        except Exception as e:
-            print(f"[{symbol}] Sahi API Exception: {e}")
-    else:
-        print(f"[{symbol}] Missing token or instrument_id (token={bool(token)}, inst_id={inst_id}) -> using Fallback.")
+        # 3. Option Chain
+        oc_url = f"{SAHI_API_BASE_URL}/v1/marketdata/optionchain"
+        oc_params = {"underlying_id": int(inst_id), "i": int(inst_id), "instrument_id": int(inst_id)}
+        oc_resp = requests.get(oc_url, headers=sahi_headers(), params=oc_params, timeout=15)
+        print(f"[{symbol}] Sahi OC HTTP {oc_resp.status_code}: {oc_resp.text[:220]}")
+        oi_summary = parse_oi_payload(oc_resp.json()) if oc_resp.status_code == 200 else None
+        if oi_summary is None:
+            oi_summary = {"pcr": 1.0, "call_oi": 0.0, "put_oi": 0.0, "source": "No Live OC"}
 
-    return fb_df, fb_oi
+        return df, oi_summary
+    except Exception as e:
+        print(f"[{symbol}] Sahi API Exception: {e}")
+        return None, None
 
 
 def analyze_footprint_and_oi(df: pd.DataFrame, oi: dict):
@@ -455,6 +468,7 @@ def generate_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict):
     current_close = float(closes[-1])
     impulse_range = max(p2_high - p1_low, 1.0)
     sl_cap = float(cfg.get("sl_cap", 65.0))
+    min_gap = max(impulse_range * 0.15, 10.0)
 
     vol_mult, body_pct, bull_candle, footprint_ok, pcr, oi_bias = analyze_footprint_and_oi(df, oi)
 
@@ -463,13 +477,15 @@ def generate_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict):
 
     if bull_pts >= bear_pts:
         side = "CALL (CE) SIDE ENTRY"
-        base_ref = p3_base
-        sl = max(p3_base, current_close - sl_cap)
-        t_05 = base_ref + impulse_range * 0.50
-        t_0618 = base_ref + impulse_range * 0.618
-        t_1414 = base_ref + impulse_range * 1.414
-        t_1618 = base_ref + impulse_range * 1.618
-        t_200 = base_ref + impulse_range * 2.00
+        base_ref = p3_base if p3_base < current_close - min_gap else (current_close - impulse_range * 0.25)
+        raw_sl = current_close - min(sl_cap, max(min_gap, current_close - base_ref))
+        sl = round(min(raw_sl, current_close - min_gap), 2)
+
+        t_05 = current_close + impulse_range * 0.50
+        t_0618 = current_close + impulse_range * 0.618
+        t_1414 = current_close + impulse_range * 1.414
+        t_1618 = current_close + impulse_range * 1.618
+        t_200 = current_close + impulse_range * 2.00
 
         if current_close >= t_1618:
             achieved, next_target = "1.618", f"{t_200:.2f} (2.0 Ext)"
@@ -477,19 +493,19 @@ def generate_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict):
             achieved, next_target = "1.414", f"{t_1618:.2f} (1.618 Ext)"
         elif current_close >= t_0618:
             achieved, next_target = "0.618", f"{t_1414:.2f} (1.414 Ext)"
-        elif current_close >= t_05:
-            achieved, next_target = "0.50", f"{t_0618:.2f} (0.618 Ext)"
         else:
             achieved, next_target = "Base / Pullback", f"{t_05:.2f} (0.50 Ext)"
     else:
         side = "PUT (PE) SIDE ENTRY"
-        base_ref = p2_high
-        sl = min(p2_high, current_close + sl_cap)
-        t_05 = base_ref - impulse_range * 0.50
-        t_0618 = base_ref - impulse_range * 0.618
-        t_1414 = base_ref - impulse_range * 1.414
-        t_1618 = base_ref - impulse_range * 1.618
-        t_200 = base_ref - impulse_range * 2.00
+        top_ref = p2_high if p2_high > current_close + min_gap else (current_close + impulse_range * 0.25)
+        raw_sl = current_close + min(sl_cap, max(min_gap, top_ref - current_close))
+        sl = round(max(raw_sl, current_close + min_gap), 2)
+
+        t_05 = current_close - impulse_range * 0.50
+        t_0618 = current_close - impulse_range * 0.618
+        t_1414 = current_close - impulse_range * 1.414
+        t_1618 = current_close - impulse_range * 1.618
+        t_200 = current_close - impulse_range * 2.00
 
         if current_close <= t_1618:
             achieved, next_target = "1.618", f"{t_200:.2f} (2.0 Ext)"
@@ -497,8 +513,6 @@ def generate_signal(symbol: str, cfg: dict, df: pd.DataFrame, oi: dict):
             achieved, next_target = "1.414", f"{t_1618:.2f} (1.618 Ext)"
         elif current_close <= t_0618:
             achieved, next_target = "0.618", f"{t_1414:.2f} (1.414 Ext)"
-        elif current_close <= t_05:
-            achieved, next_target = "0.50", f"{t_0618:.2f} (0.618 Ext)"
         else:
             achieved, next_target = "Top / Pullback", f"{t_05:.2f} (0.50 Ext)"
 
@@ -542,6 +556,8 @@ def main():
     sent = 0
     for sym, cfg in INSTRUMENT_MAP.items():
         df, oi = fetch_sahi_candles_and_oi(sym, cfg)
+        if df is None or oi is None:
+            continue
         msg, log_row = generate_signal(sym, cfg, df, oi)
         append_trade_log(log_row)
         if send_telegram_alert(msg):
